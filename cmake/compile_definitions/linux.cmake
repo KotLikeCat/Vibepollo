@@ -355,6 +355,7 @@ endif ()
 list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/provider_scan_protocol.h"
         "${CMAKE_SOURCE_DIR}/src/provider_scan_protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/clipboard_sync_stub.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.cpp"
