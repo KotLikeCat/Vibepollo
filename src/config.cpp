@@ -2350,6 +2350,8 @@ namespace config {
 
     bool_f(vars, "realtime_stats_enabled", sunshine.realtime_stats_enabled);
     int_between_f(vars, "realtime_stats_poll_interval_ms", sunshine.realtime_stats_poll_interval_ms, {250, 60000});
+    bool_f(vars, "clipboard_sync", sunshine.clipboard_sync);
+    int_between_f(vars, "clipboard_max_bytes", sunshine.clipboard_max_bytes, {1024 * 1024, 256 * 1024 * 1024});
 
     // Web-UI-only realtime stats preferences; consumed here so they are not
     // reported as unrecognized options.

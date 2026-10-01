@@ -43,6 +43,8 @@
 
 // local includes
 #include "app_display_policy.h"
+#include "clipboard/bundle.h"
+#include "clipboard/sync_policy.h"
 #include "config.h"
 #include "display_device.h"
 #include "display_helper_integration.h"
@@ -57,6 +59,7 @@
 #include "nvhttp.h"
 #include "remote_session.h"
 #include "remote_display_topology.h"
+#include "platform/clipboard_sync.h"
 #include "platform/common.h"
 #include "pyrowave_protocol.h"
 #include "state_storage.h"
@@ -3764,6 +3767,10 @@ namespace nvhttp {
       tree.put("root.VirtualDisplayHDRCapable", false);
 #endif
 
+      if (config::sunshine.clipboard_sync && platf::clipboard_sync::supported()) {
+        tree.put("root.ClipboardSync", 1);
+      }
+
       // Only include the MAC address for requests sent from paired clients over HTTPS.
       // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
       if constexpr (std::is_same_v<SunshineHTTPS, T>) {
@@ -5973,7 +5980,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type");
-    if (clipboard_type != "text"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv) {
       BOOST_LOG(debug) << "Clipboard type [" << clipboard_type << "] is not supported!";
 
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
@@ -5994,6 +6001,49 @@ namespace nvhttp {
 
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       response->close_connection_after_response = true;
+      return;
+    }
+
+    if (clipboard_type == "bundle"sv) {
+      if (!config::sunshine.clipboard_sync || !platf::clipboard_sync::supported()) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        response->close_connection_after_response = true;
+        return;
+      }
+      std::uint32_t formats_mask = clipboard::format_all;
+      if (const auto formats_arg = args.find("formats"); formats_arg != args.end()) {
+        try {
+          formats_mask = static_cast<std::uint32_t>(std::stoul(formats_arg->second)) & clipboard::format_all;
+        } catch (...) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request);
+          response->close_connection_after_response = true;
+          return;
+        }
+      }
+      const auto seq = platf::clipboard_sync::sequence();
+      auto items = platf::clipboard_sync::read(formats_mask);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("X-Clipboard-Seq", std::to_string(seq));
+      if (!items) {
+        BOOST_LOG(debug) << "Clipboard bundle read failed: clipboard unavailable"sv;
+        response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+        response->close_connection_after_response = true;
+        return;
+      }
+      if (items->empty()) {
+        response->write(SimpleWeb::StatusCode::success_no_content, headers);
+        return;
+      }
+      if (!clipboard::fit_to_limit(*items, static_cast<std::size_t>(config::sunshine.clipboard_max_bytes))) {
+        BOOST_LOG(warning) << "Clipboard bundle exceeds clipboard_max_bytes even without images"sv;
+        response->write(SimpleWeb::StatusCode::client_error_payload_too_large);
+        response->close_connection_after_response = true;
+        return;
+      }
+      const auto body = clipboard::encode(*items);
+      headers.emplace("Content-Type", "application/octet-stream");
+      BOOST_LOG(debug) << "Sending clipboard bundle to ["sv << verified_client->name << "]: formats 0x"sv << std::hex << clipboard::mask_of(*items) << std::dec << ", "sv << body.size() << " bytes"sv;
+      response->write(SimpleWeb::StatusCode::success_ok, body, headers);
       return;
     }
 
@@ -6019,7 +6069,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type");
-    if (clipboard_type != "text"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv) {
       BOOST_LOG(debug) << "Clipboard type [" << clipboard_type << "] is not supported!";
 
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
@@ -6040,6 +6090,43 @@ namespace nvhttp {
 
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       response->close_connection_after_response = true;
+      return;
+    }
+
+    if (clipboard_type == "bundle"sv) {
+      if (!config::sunshine.clipboard_sync || !platf::clipboard_sync::supported()) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        response->close_connection_after_response = true;
+        return;
+      }
+      const auto body = request->content.string();
+      const auto decoded = clipboard::decode(body, static_cast<std::size_t>(config::sunshine.clipboard_max_bytes));
+      if (decoded.error == clipboard::decode_error::too_large) {
+        response->write(SimpleWeb::StatusCode::client_error_payload_too_large);
+        response->close_connection_after_response = true;
+        return;
+      }
+      if (decoded.error != clipboard::decode_error::none || decoded.items.empty()) {
+        BOOST_LOG(debug) << "Rejected clipboard bundle: "sv << clipboard::error_name(decoded.error);
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        response->close_connection_after_response = true;
+        return;
+      }
+      std::optional<std::uint32_t> seq;
+      {
+        auto write_guard = clipboard::shared_policy().lock_host_write();
+        seq = platf::clipboard_sync::write(decoded.items);
+        if (seq) {
+          clipboard::shared_policy().note_host_write(*seq, verified_client->uuid);
+        }
+      }
+      if (!seq) {
+        response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+        response->close_connection_after_response = true;
+        return;
+      }
+      BOOST_LOG(debug) << "Clipboard set from ["sv << verified_client->name << "]: formats 0x"sv << std::hex << clipboard::mask_of(decoded.items) << std::dec << ", "sv << body.size() << " bytes"sv;
+      response->write(SimpleWeb::StatusCode::success_ok);
       return;
     }
 
@@ -6442,6 +6529,8 @@ namespace nvhttp {
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
+    // Bounds every HTTPS request body (clipboard bundles are the largest legitimate payload).
+    https_server.config.max_request_streambuf_size = static_cast<std::size_t>(config::sunshine.clipboard_max_bytes) + 64 * 1024;
 
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.default_resource["POST"] = not_found<SimpleWeb::HTTP>;

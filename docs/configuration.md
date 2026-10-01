@@ -268,6 +268,54 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### clipboard_sync
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Sync text, rich text and images between the host clipboard and Moonlight clients that support it.
+            A client also needs the clipboard read/set permissions.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_sync = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### clipboard_max_bytes
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Maximum size in bytes of clipboard data exchanged with a client (1048576 to 268435456).
+            Images are dropped first when the limit is exceeded.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            33554432
+            @endcode (32 MiB)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_max_bytes = 67108864
+            @endcode</td>
+    </tr>
+</table>
+
 ### update_check_interval
 
 <table>

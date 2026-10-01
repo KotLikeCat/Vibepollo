@@ -509,6 +509,8 @@ namespace config {
     std::vector<std::string> csrf_allowed_origins;
     bool realtime_stats_enabled {true};  ///< Sample live host stats (CPU/GPU/RAM/VRAM) for the web UI
     int realtime_stats_poll_interval_ms {2000};  ///< Host stats sampler interval in milliseconds
+    bool clipboard_sync {true};  ///< Sync the host clipboard with Moonlight clients that support it
+    int clipboard_max_bytes {32 * 1024 * 1024};  ///< Max size of one clipboard bundle in bytes
   };
 
   extern video_t video;
