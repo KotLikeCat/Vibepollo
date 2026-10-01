@@ -1406,6 +1406,10 @@ namespace stream {
   // Kept out of controlBroadcastThread: the template commas would break the KITTY_WHILE_LOOP macro.
   std::optional<std::pair<std::uint32_t, std::uint32_t>> take_clipboard_notice(session_t *session) {
     std::optional<std::pair<std::uint32_t, std::uint32_t>> notice;
+    if (!session->control.peer) {
+      // Keep the pending notice until the peer exists so new sessions still get the greeting.
+      return notice;
+    }
     std::lock_guard notice_lock {session->clipboard_notice.mutex};
     notice.swap(session->clipboard_notice.pending);
     return notice;
@@ -1887,7 +1891,7 @@ namespace stream {
             }
 
             auto clipboard_notice = take_clipboard_notice(session);
-            if (clipboard_notice && session->control.peer) {
+            if (clipboard_notice) {
               send_clipboard_changed(session, clipboard_notice->first, clipboard_notice->second);
             }
           }
