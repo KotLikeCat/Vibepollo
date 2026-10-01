@@ -382,6 +382,8 @@ sunshine_register_component(NAME test_component_stream_protocol TEST_SOURCE unit
 sunshine_register_component(NAME test_component_clipboard_bundle TEST_SOURCE unit/test_clipboard_bundle.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/bundle.cpp"
     DEFINITIONS "CLIPBOARD_VECTORS_PATH=\"${SUNSHINE_TEST_REPOSITORY_ROOT}/tests/fixtures/clipboard_bundle/vectors.txt\"")
+sunshine_register_component(NAME test_component_clipboard_formats TEST_SOURCE unit/test_clipboard_formats.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/formats.cpp")
 sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/test_remote_session.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/remote_session.cpp")
 sunshine_register_component(NAME test_component_rtsp_pending_policy TEST_SOURCE unit/test_rtsp_pending_policy.cpp
