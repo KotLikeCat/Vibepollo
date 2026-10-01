@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -135,4 +136,36 @@ TEST(ClipboardWin, ReportsUnavailableWhenClipboardIsLocked) {
   holder.join();
   EXPECT_FALSE(result.has_value());
   EXPECT_LT(elapsed, 500ms);
+}
+
+TEST(ClipboardWin, WritesValidDibForPngItems) {
+  if (!cs::write({{item_type::png, k_png}})) {
+    GTEST_SKIP() << "Clipboard is not available in this session";
+  }
+  if (!OpenClipboard(nullptr)) {
+    GTEST_SKIP() << "Clipboard is not available in this session";
+  }
+  UINT format = CF_DIBV5;
+  HANDLE handle = GetClipboardData(CF_DIBV5);
+  if (!handle) {
+    format = CF_DIB;
+    handle = GetClipboardData(CF_DIB);
+  }
+  ASSERT_NE(handle, nullptr) << "Neither CF_DIBV5 nor CF_DIB present";
+  const auto *header = static_cast<const BITMAPINFOHEADER *>(GlobalLock(handle));
+  ASSERT_NE(header, nullptr);
+  const DWORD size = header->biSize;
+  const LONG width = header->biWidth;
+  const LONG height = header->biHeight;
+  const WORD bits = header->biBitCount;
+  GlobalUnlock(handle);
+  CloseClipboard();
+  if (format == CF_DIBV5) {
+    EXPECT_EQ(size, sizeof(BITMAPV5HEADER));
+  } else {
+    EXPECT_GE(size, sizeof(BITMAPINFOHEADER));
+  }
+  EXPECT_EQ(width, 1);
+  EXPECT_EQ(std::abs(height), 1);
+  EXPECT_EQ(bits, 32);
 }

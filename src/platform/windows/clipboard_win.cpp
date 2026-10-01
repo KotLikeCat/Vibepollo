@@ -322,8 +322,16 @@ namespace {
         case item_type::png:
           {
             native.emplace_back(cf_png(), entry.data);
-            if (auto bmp = transcode(entry.data, GUID_ContainerFormatBmp); bmp && bmp->size() > sizeof(BITMAPFILEHEADER)) {
-              native.emplace_back(CF_DIBV5, bmp->substr(sizeof(BITMAPFILEHEADER)));
+            if (auto bmp = transcode(entry.data, GUID_ContainerFormatBmp); bmp && bmp->size() > sizeof(BITMAPFILEHEADER) + sizeof(DWORD)) {
+              std::string dib = bmp->substr(sizeof(BITMAPFILEHEADER));
+              DWORD header_size = 0;
+              std::memcpy(&header_size, dib.data(), sizeof(header_size));
+              // The encoder may ignore EnableV5Header32bppBGRA; only a real V5 header may be tagged CF_DIBV5.
+              if (header_size == sizeof(BITMAPV5HEADER)) {
+                native.emplace_back(CF_DIBV5, std::move(dib));
+              } else if (header_size >= sizeof(BITMAPINFOHEADER)) {
+                native.emplace_back(CF_DIB, std::move(dib));
+              }
             }
             break;
           }
@@ -400,8 +408,12 @@ namespace platf::clipboard_sync {
       if (!scope.open() || !EmptyClipboard()) {
         return std::nullopt;
       }
+      bool ok = true;
       for (const auto &[format, bytes] : native) {
-        set_global(format, bytes);
+        ok = set_global(format, bytes) && ok;
+      }
+      if (!ok) {
+        return std::nullopt;
       }
     }
     return GetClipboardSequenceNumber();
