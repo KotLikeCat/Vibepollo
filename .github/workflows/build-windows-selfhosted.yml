@@ -140,6 +140,24 @@ jobs:
             -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
           cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
 
+      - name: Clipboard tests
+        run: |
+          NODEJS_PATH=$(cygpath -u "$NODEJS_PATH")
+          export PATH="${NODEJS_PATH}:$PATH"
+          if [ ! -f build-tests/build.ninja ]; then
+            cmake -B build-tests -G Ninja -S . -DBUILD_TESTS=ON -DBUILD_DOCS=OFF -DBUILD_WERROR=OFF \
+              -DCMAKE_BUILD_TYPE=Release -DSUNSHINE_ENABLE_WEBRTC=OFF \
+              -DBUILD_SUNSHINE_VIRTUAL_DISPLAY_DRIVER=OFF -DBUILD_VIRTUALDISPLAY_PROBE=OFF \
+              -DBUILD_VIRTUALDISPLAY_TOOLS=OFF -DBUILD_VIRTUALDISPLAY_VULKAN_LAYER=OFF \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DSUNSHINE_NPM_EXECUTABLE="$(cygpath -m "${NODEJS_PATH}/npm.cmd")"
+          fi
+          cmake --build build-tests --parallel "$CMAKE_BUILD_PARALLEL_LEVEL" --target \
+            test_component_clipboard_bundle test_component_clipboard_formats \
+            test_component_clipboard_sync_policy test_component_clipboard_win \
+            test_component_resource_config_catalog
+          ctest --test-dir build-tests -R "clipboard|resource_config_catalog" --output-on-failure
+
       - name: Strip binaries
         run: |
           mapfile -d '' binaries < <(find build -type f \( -name '*.exe' -o -name '*.dll' \) \
