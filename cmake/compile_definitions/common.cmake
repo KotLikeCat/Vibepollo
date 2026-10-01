@@ -121,6 +121,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream_protocol.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/bundle.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/bundle.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"

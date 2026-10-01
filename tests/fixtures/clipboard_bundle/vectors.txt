@@ -1,0 +1,13 @@
+# Shared clipboard bundle (MLCB v1) test vectors. Keep identical in moonlight-qt tests/clipboard/vectors.txt.
+empty ok 4d4c43420100
+text_hi ok 4d4c4342010101020000006869
+text_and_png ok 4d4c4342010201020000006869040300000089504e
+unknown_type_skipped ok_lossy 4d4c4342010209010000007801020000006869
+bad_magic bad_magic 4d4c43410100
+bad_version bad_version 4d4c43420200
+too_many_items too_many_items 4d4c43420109
+truncated_header truncated 4d4c4342
+truncated_item_data truncated 4d4c4342010101050000006869
+truncated_item_header truncated 4d4c4342010101
+trailing_bytes trailing_bytes 4d4c4342010000
+duplicate_type duplicate_type 4d4c43420102010100000061010100000062
