@@ -100,6 +100,32 @@ TEST(ClipboardWin, ConvertsDibOnlyImageToPng) {
   EXPECT_EQ((*back)[0].data.compare(0, 8, "\x89PNG\r\n\x1a\n", 8), 0);
 }
 
+TEST(ClipboardWin, RejectsImageAbovePixelCap) {
+  BITMAPINFOHEADER header {};
+  header.biSize = sizeof(header);
+  header.biWidth = 20000;
+  header.biHeight = 20000;  // 400 MP claimed, tiny body
+  header.biPlanes = 1;
+  header.biBitCount = 32;
+  header.biCompression = BI_RGB;
+  std::string dib(reinterpret_cast<const char *>(&header), sizeof(header));
+  dib.append(std::string("\x00\x00\xff\x00", 4));
+  if (!OpenClipboard(nullptr)) {
+    GTEST_SKIP() << "Clipboard is not available in this session";
+  }
+  EmptyClipboard();
+  HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, dib.size());
+  std::memcpy(GlobalLock(handle), dib.data(), dib.size());
+  GlobalUnlock(handle);
+  SetClipboardData(CF_DIB, handle);
+  CloseClipboard();
+
+  const auto back = cs::read(clipboard::format_png);
+  if (back) {
+    EXPECT_FALSE(find(*back, item_type::png).has_value());
+  }
+}
+
 TEST(ClipboardWin, ReportsUnavailableWhenClipboardIsLocked) {
   std::atomic<int> state {0};  // 0 = starting, 1 = holding, 2 = could not open
   std::atomic<bool> release {false};

@@ -885,6 +885,7 @@ if(WIN32)
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/formats.cpp"
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/utf_utils.cpp"
         LINK_LIBRARIES windowscodecs ole32 oleaut32 shlwapi)
+    set_tests_properties(test_component_clipboard_win PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
     sunshine_register_component(NAME test_component_game_activity TEST_SOURCE unit/platform/windows/test_game_activity.cpp
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/game_activity_policy.cpp")
     sunshine_register_component(NAME test_component_native_amf_policy TEST_SOURCE unit/platform/windows/test_native_amf_review.cpp)

@@ -255,8 +255,10 @@ namespace {
     UINT width = 0;
     UINT height = 0;
     WICPixelFormatGUID pixel_format = GUID_WICPixelFormat32bppBGRA;
+    if (FAILED(converter->GetSize(&width, &height)) || width == 0 || height == 0 || static_cast<std::uint64_t>(width) * height > 100'000'000ull) {
+      return std::nullopt;
+    }
     if (FAILED(output->Initialize(options.get())) ||
-        FAILED(converter->GetSize(&width, &height)) ||
         FAILED(output->SetSize(width, height)) ||
         FAILED(output->SetPixelFormat(&pixel_format)) ||
         FAILED(output->WriteSource(converter.get(), nullptr)) ||
@@ -287,7 +289,9 @@ namespace {
       if (auto dib = read_global(format)) {
         const auto bmp = dib_to_bmp_file(*dib);
         if (!bmp.empty()) {
-          return transcode(bmp, GUID_ContainerFormatPng);
+          if (auto png = transcode(bmp, GUID_ContainerFormatPng)) {
+            return png;
+          }
         }
       }
     }
@@ -374,7 +378,7 @@ namespace platf::clipboard_sync {
     }
     std::vector<item> items;
     if (formats_mask & ::clipboard::format_text) {
-      if (auto text = read_text()) {
+      if (auto text = read_text(); text && !text->empty()) {
         items.push_back({item_type::text, std::move(*text)});
       }
     }

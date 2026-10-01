@@ -3366,7 +3366,9 @@ namespace confighttp {
         "address_family",
         "upnp",
         "pkey",
-        "cert"
+        "cert",
+        "clipboard_sync",
+        "clipboard_max_bytes"
       };
       bool restart_required = false;
       for (const auto &k : changed_keys) {
@@ -3475,7 +3477,9 @@ namespace confighttp {
         "address_family",
         "upnp",
         "pkey",
-        "cert"
+        "cert",
+        "clipboard_sync",
+        "clipboard_max_bytes"
       };
       bool restart_required = false;
       for (const auto &k : changed_keys) {
