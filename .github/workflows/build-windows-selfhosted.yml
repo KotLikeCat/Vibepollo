@@ -1,0 +1,178 @@
+name: Build Windows (self-hosted)
+# Fork-only build of the Windows installer on the home build-win runner.
+# Differences from ci-windows.yml: no WebRTC, no SignPath, no symbols, no tests.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: Version stamped into the build
+        required: false
+        default: 2.0.0
+  push:
+    branches:
+      - master
+      - 'feat/**'
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows installer
+    if: github.repository == 'KotLikeCat/Vibepollo'
+    runs-on: [self-hosted, Windows, vp-win]
+    timeout-minutes: 120
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 8
+      BUILD_VERSION: ${{ inputs.build_version || '2.0.0' }}
+      MSYSTEM: UCRT64
+      CHERE_INVOKING: 1
+      MSYS2_PATH_TYPE: inherit
+      NODEJS_PATH: C:\Program Files\nodejs
+    defaults:
+      run:
+        shell: C:\msys64\usr\bin\bash.exe --login -eo pipefail '{0}'
+    steps:
+      - name: Prepare self-hosted build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($tool in @('git', '7z')) { Get-Command $tool -ErrorAction Stop | Out-Null }
+          $wixRoot = Join-Path ${env:ProgramFiles(x86)} 'WiX Toolset v3.14'
+          if (-not (Test-Path (Join-Path $wixRoot 'bin\candle.exe'))) { throw 'WiX 3.14 is not installed.' }
+          "WIX=$wixRoot\" >> $env:GITHUB_ENV
+          (Join-Path $wixRoot 'bin') >> $env:GITHUB_PATH
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Checkout submodules (skip heavy ones)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # libwebrtc/depot_tools are only needed for WebRTC; build-deps' nested
+          # FFmpeg sources are huge and unused (FFmpeg is downloaded prebuilt).
+          git -c submodule.third-party/libwebrtc.update=none `
+              -c submodule.third-party/depot_tools.update=none `
+              -c submodule.third-party/build-deps.update=none `
+              -c submodule.packaging/linux/flatpak/deps/flatpak-builder-tools.update=none `
+              -c submodule.packaging/linux/flatpak/deps/shared-modules.update=none `
+              submodule update --init --recursive --jobs 8 --depth 1
+          if ($LASTEXITCODE -ne 0) { throw 'submodule update failed' }
+          git submodule update --init --depth 1 third-party/build-deps
+          git -C third-party/build-deps submodule update --init --depth 1 third-party/FFmpeg/Vulkan-Headers
+          if ($LASTEXITCODE -ne 0) { throw 'build-deps submodule update failed' }
+
+      - name: Download verified VHF gamepad driver package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'vhf-gamepad-producer-release'
+          .\scripts\download_libvirtualgamepad_release.ps1 `
+            -Repository Nonary/libvirtualgamepad `
+            -Tag v0.1.0-beta.6 `
+            -ExpectedArchiveSha256 a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782 `
+            -ExpectedSourceRevision 4b56fb9da177f320fb2d7ddb1b6262e5d55d2750 `
+            -ExpectedDriverVer '09/22/2026,0.1.0.39' `
+            -ExpectedProtocolVersion '2' `
+            -OutDir $packageRoot `
+            -GitHubToken $env:GH_TOKEN
+          "VHF_PACKAGE_ROOT=$packageRoot" >> $env:GITHUB_ENV
+
+      - name: Download virtual display driver package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $downloadDir = Join-Path $PWD 'libvirtualdisplay-1.6.3-windows-x64'
+          .\scripts\download_libvirtualdisplay_release.ps1 `
+            -Repository Nonary/libvirtualdisplay `
+            -Tag v1.6.3 `
+            -OutDir $downloadDir `
+            -GitHubToken $env:GH_TOKEN
+          "VDD_PREBUILT_PACKAGE_DIR=$downloadDir" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: |
+          NODEJS_PATH=$(cygpath -u "$NODEJS_PATH")
+          export PATH="${NODEJS_PATH}:$PATH"
+          NPM_PATH="$(cygpath -m "${NODEJS_PATH}/npm.cmd")"
+          echo "node $(node --version), npm $(npm --version), gcc $(gcc -dumpfullversion)"
+
+          cmake -B build -G Ninja -S . \
+            -DBUILD_WERROR=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_SUNSHINE_VIRTUAL_DISPLAY_DRIVER=OFF \
+            -DBUILD_VIRTUALDISPLAY_PROBE=OFF \
+            -DBUILD_VIRTUALDISPLAY_TOOLS=OFF \
+            -DBUILD_VIRTUALDISPLAY_VULKAN_LAYER=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSUNSHINE_ENABLE_WEBRTC=OFF \
+            -DSUNSHINE_NPM_EXECUTABLE="${NPM_PATH}" \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_PUBLISHER_NAME="${GITHUB_REPOSITORY_OWNER}" \
+            -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/${GITHUB_REPOSITORY}" \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues" \
+            -DSUNSHINE_LIBVIRTUALDISPLAY_PREBUILT_DIR="$(cygpath -u "${VDD_PREBUILT_PACKAGE_DIR}")" \
+            -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON \
+            -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")" \
+            -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.6 \
+            -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=a45a8ae27d2764ad26a4b89d43d1e2dc43510d84bddd5899aac7c80499754782 \
+            -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=4b56fb9da177f320fb2d7ddb1b6262e5d55d2750 \
+            "-DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=09/22/2026,0.1.0.39" \
+            -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
+          cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+
+      - name: Strip binaries
+        run: |
+          mapfile -d '' binaries < <(find build -type f \( -name '*.exe' -o -name '*.dll' \) \
+            ! -path '*/cpack_artifacts/*' ! -path '*/CMakeFiles/*' ! -path '*/_deps/*' ! -path '*/tests/*' -print0)
+          (( ${#binaries[@]} )) && strip --strip-debug --strip-unneeded "${binaries[@]}"
+
+      - name: Package MSI
+        id: msi
+        run: |
+          cmake --build build --target package_msi --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+          msi_path=$(ls -t build/cpack_artifacts/*.msi | head -n 1)
+          echo "msi_path=$(cygpath -w "$msi_path")" >> "$GITHUB_OUTPUT"
+          echo "Built $msi_path"
+
+      - name: Package setup EXE
+        shell: pwsh
+        env:
+          MSI_PATH: ${{ steps.msi.outputs.msi_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\packaging\windows\bootstrapper\build_bootstrapper.ps1 `
+            -BuildDir (Join-Path $PWD 'build') `
+            -MsiPath $env:MSI_PATH `
+            -OutputName 'VibepolloSetup.exe' `
+            -DisableSignPath
+          if (-not (Test-Path .\build\cpack_artifacts\VibepolloSetup.exe)) { throw 'Setup EXE was not produced.' }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vibepollo-windows-${{ github.sha }}
+          path: |
+            build/cpack_artifacts/VibepolloSetup.exe
+            build/cpack_artifacts/*.msi
+          if-no-files-found: error
+          retention-days: 14
