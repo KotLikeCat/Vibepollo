@@ -125,6 +125,8 @@ namespace stream {
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
     std::string uuid(const session_t &session);
+    void post_clipboard_changed(session_t &session, std::uint32_t seq, std::uint32_t formats);
+    crypto::PERM permission(session_t &session);
     bool uuid_match(const session_t &session, const std::string_view &uuid);
     bool update_device_info(session_t &session, const std::string &name, const crypto::PERM &newPerm);
     bool remote_role_match(const session_t &session, remote_session::role_e role, std::optional<std::uint64_t> generation = std::nullopt);

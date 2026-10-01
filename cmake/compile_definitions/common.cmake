@@ -127,6 +127,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/clipboard/formats.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/sync_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/sync_policy.h"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/watcher.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/watcher.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"

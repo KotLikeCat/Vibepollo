@@ -100,6 +100,7 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_CLIPBOARD_CHANGED 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -121,6 +122,7 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x3003,  // Clipboard changed (Vibepollo protocol extension, host -> client)
 };
 
 namespace asio = boost::asio;
@@ -445,6 +447,13 @@ namespace stream {
     SS_HDR_METADATA metadata;
   };
 
+  struct control_clipboard_changed_t {
+    control_header_v2 header;
+
+    std::uint32_t seq;
+    std::uint32_t formats;
+  };
+
   typedef struct control_encrypted_t {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001
     std::uint16_t length;  // sizeof(seq) + 16 byte tag + secondary header and data
@@ -663,6 +672,11 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
     } control;
+
+    struct {
+      std::mutex mutex;
+      std::optional<std::pair<std::uint32_t, std::uint32_t>> pending;  ///< {seq, formats}; only the latest matters
+    } clipboard_notice;
 
     std::uint32_t launch_session_id;
     std::mutex metadata_mutex;
@@ -1389,6 +1403,35 @@ namespace stream {
     return 0;
   }
 
+  // Kept out of controlBroadcastThread: the template commas would break the KITTY_WHILE_LOOP macro.
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> take_clipboard_notice(session_t *session) {
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> notice;
+    std::lock_guard notice_lock {session->clipboard_notice.mutex};
+    notice.swap(session->clipboard_notice.pending);
+    return notice;
+  }
+
+  int send_clipboard_changed(session_t *session, std::uint32_t seq, std::uint32_t formats) {
+    control_clipboard_changed_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_CLIPBOARD_CHANGED];
+    plaintext.header.payloadLength = sizeof(control_clipboard_changed_t) - sizeof(control_header_v2);
+    plaintext.seq = util::endian::little(seq);
+    plaintext.formats = util::endian::little(formats);
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send clipboard change notice to ["sv << addr << ':' << port << ']';
+      return -1;
+    }
+
+    BOOST_LOG(debug) << "Sent clipboard change notice: seq "sv << seq << ", formats 0x"sv << std::hex << formats << std::dec;
+    return 0;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1841,6 +1884,11 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
+            }
+
+            auto clipboard_notice = take_clipboard_notice(session);
+            if (clipboard_notice && session->control.peer) {
+              send_clipboard_changed(session, clipboard_notice->first, clipboard_notice->second);
             }
           }
 
@@ -3346,6 +3394,16 @@ namespace stream {
 
     std::string uuid(const session_t &session) {
       return session.device_uuid;
+    }
+
+    void post_clipboard_changed(session_t &session, std::uint32_t seq, std::uint32_t formats) {
+      std::lock_guard lock {session.clipboard_notice.mutex};
+      session.clipboard_notice.pending = std::make_pair(seq, formats);
+    }
+
+    crypto::PERM permission(session_t &session) {
+      // update_device_info() writes session.permission without any lock; mirror that (no lock here either).
+      return session.permission;
     }
 
     bool uuid_match(const session_t &session, const std::string_view &uuid) {

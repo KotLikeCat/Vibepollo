@@ -20,6 +20,7 @@
 #include <thread>
 
 // local includes
+#include "clipboard/watcher.h"
 #include "confighttp.h"
 #include "entry_handler.h"
 #include "globals.h"
@@ -997,6 +998,7 @@ int main(int argc, char *argv[]) {
 
   std::thread httpThread {nvhttp::start};
   std::thread rtspThread {rtsp_stream::start};
+  clipboard::watcher::start();
 
 #ifdef _WIN32
   // Stale-display cleanup is separate from encoder validation and therefore
@@ -1018,6 +1020,7 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown
   shutdown_event->view();
+  clipboard::watcher::stop();
 #ifdef __linux__
   if (supervised_machine_host) {
     platf::linux_private_display::request_process_shutdown_preserve();
