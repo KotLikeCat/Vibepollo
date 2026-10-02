@@ -128,6 +128,8 @@ const defaultGroups = [
       audio_sink: '',
       audio_sink_capture_only: 'disabled',
       virtual_sink: '',
+      mic_passthrough: 'enabled',
+      mic_sink: '',
       install_steam_audio_drivers: 'enabled',
       stream_audio: 'enabled',
       keep_sink_default: 'enabled',

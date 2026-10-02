@@ -46,6 +46,7 @@ extern "C" {
 #include "host_stats.h"
 #include "input.h"
 #include "logging.h"
+#include "mic/receiver.h"
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
@@ -101,6 +102,7 @@ extern "C" {
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_CLIPBOARD_CHANGED 19
+#define IDX_MIC_AUDIO 20
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -123,6 +125,7 @@ static const short packetTypes[] = {
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Clipboard changed (Vibepollo protocol extension, host -> client)
+  0x3004,  // Microphone audio (Vibepollo protocol extension, client -> host)
 };
 
 namespace asio = boost::asio;
@@ -1629,6 +1632,31 @@ namespace stream {
         BOOST_LOG(debug) << "Permission Clipboard Set deined for [" << session->device_name << "]";
         return;
       }
+    });
+
+    mic::receiver::set_sink_factory([]() {
+      return platf::create_mic_sink(config::audio.mic_sink);
+    });
+
+    // Microphone audio: u8 version (1), u16 LE seq, then one Opus packet (48 kHz mono, 20 ms).
+    server->map(packetTypes[IDX_MIC_AUDIO], [](session_t *session, const std::string_view &payload) {
+      if (!config::audio.mic_passthrough) {
+        return;
+      }
+
+      if (!(session->permission & crypto::PERM::_all_inputs)) {
+        BOOST_LOG(debug) << "Microphone audio denied for [" << session->device_name << "]: no input permission";
+        return;
+      }
+
+      constexpr std::size_t header_size = 3;
+      if (payload.size() <= header_size || static_cast<std::uint8_t>(payload[0]) != 1) {
+        BOOST_LOG(debug) << "Dropping malformed microphone packet, size: " << payload.size();
+        return;
+      }
+
+      const auto seq = static_cast<std::uint16_t>(static_cast<std::uint8_t>(payload[1]) | (static_cast<std::uint8_t>(payload[2]) << 8));
+      mic::receiver::submit(reinterpret_cast<std::uintptr_t>(session), seq, payload.substr(header_size));
     });
 
     server->map(packetTypes[IDX_FILE_TRANSFER_NONCE_REQUEST], [server](session_t *session, const std::string_view &payload) {
@@ -3523,6 +3551,7 @@ namespace stream {
         BOOST_LOG(debug) << "Waiting for control to end..."sv;
         session.controlEnd.view();
       }
+      mic::receiver::session_ended(reinterpret_cast<std::uintptr_t>(&session));
       // Watchdog coverage ends with the thread joins, which are the unbounded and
       // unrecoverable part. Everything below waits on the process-wide lifecycle
       // gate, which other threads legitimately hold for much longer than

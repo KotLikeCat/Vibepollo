@@ -60,6 +60,7 @@
 #include "remote_session.h"
 #include "remote_display_topology.h"
 #include "platform/clipboard_sync.h"
+#include "platform/mic_sink.h"
 #include "platform/common.h"
 #include "pyrowave_protocol.h"
 #include "state_storage.h"
@@ -96,6 +97,27 @@
 using namespace std::literals;
 
 namespace nvhttp {
+  namespace {
+    /// Device enumeration is not free, so the answer is cached for 10 s (keyed by the configured sink).
+    bool mic_sink_available_cached() {
+      static std::mutex mutex;
+      static std::chrono::steady_clock::time_point checked_at;
+      static std::string checked_name;
+      static bool checked = false;
+      static bool available = false;
+
+      std::lock_guard lock {mutex};
+      const auto now = std::chrono::steady_clock::now();
+      if (!checked || checked_name != config::audio.mic_sink || now - checked_at >= std::chrono::seconds {10}) {
+        available = platf::mic_sink_available(config::audio.mic_sink);
+        checked_name = config::audio.mic_sink;
+        checked_at = now;
+        checked = true;
+      }
+      return available;
+    }
+  }  // namespace
+
 
   namespace {
     struct remote_role_owner_t {
@@ -3769,6 +3791,10 @@ namespace nvhttp {
 
       if (config::sunshine.clipboard_sync && platf::clipboard_sync::supported()) {
         tree.put("root.ClipboardSync", 1);
+      }
+
+      if (config::audio.mic_passthrough && mic_sink_available_cached()) {
+        tree.put("root.Microphone", 1);
       }
 
       // Only include the MAC address for requests sent from paired clients over HTTPS.

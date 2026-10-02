@@ -1018,6 +1018,55 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### mic_passthrough
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Accept microphone audio from Moonlight clients and play it into a virtual microphone device on the host,
+            so games and chat apps hear the client's microphone. A client also needs at least one input permission.
+            Requires a virtual audio cable such as Steam Streaming Microphone or VB-CABLE (Windows only).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mic_passthrough = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### mic_sink
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Name of the audio render device that feeds microphone audio to the host (matches any device name field,
+            case-insensitive). If empty, "Steam Streaming Microphone" and then "CABLE Input" (VB-Audio) are tried.
+            A real speaker is never used.
+            @tip{See [mic_passthrough](#mic_passthrough)!}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Selected automatically.</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            mic_sink = CABLE Input
+            @endcode</td>
+    </tr>
+</table>
+
 ### install_steam_audio_drivers
 
 <table>

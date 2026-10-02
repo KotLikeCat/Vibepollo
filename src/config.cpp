@@ -975,6 +975,8 @@ namespace config {
   audio_t audio {
     {},  // audio_sink
     {},  // virtual_sink
+    true,  // mic_passthrough
+    {},  // mic_sink
     true,  // stream audio
     true,  // install_steam_drivers
     true,  // keep_sink_default
@@ -2104,6 +2106,8 @@ namespace config {
 
     string_f(vars, "audio_sink", audio.sink);
     string_f(vars, "virtual_sink", audio.virtual_sink);
+    bool_f(vars, "mic_passthrough", audio.mic_passthrough);
+    string_f(vars, "mic_sink", audio.mic_sink);
     bool_f(vars, "stream_audio", audio.stream);
     bool_f(vars, "audio_sink_capture_only", audio.sink_capture_only);
     bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);

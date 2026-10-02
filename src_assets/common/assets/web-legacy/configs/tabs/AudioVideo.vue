@@ -279,6 +279,19 @@ function selectVirtualDisplayLayout(v: unknown) {
         />
 
         <ConfigFieldRenderer
+          setting-key="mic_passthrough"
+          v-model="config.mic_passthrough"
+          class="mb-6"
+        />
+
+        <ConfigFieldRenderer
+          setting-key="mic_sink"
+          v-model="config.mic_sink"
+          class="mb-6"
+          :placeholder="$t('config.mic_sink_placeholder')"
+        />
+
+        <ConfigFieldRenderer
           setting-key="install_steam_audio_drivers"
           v-model="config.install_steam_audio_drivers"
           class="mb-3"

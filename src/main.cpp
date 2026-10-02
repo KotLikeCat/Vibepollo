@@ -21,6 +21,7 @@
 
 // local includes
 #include "clipboard/watcher.h"
+#include "mic/receiver.h"
 #include "confighttp.h"
 #include "entry_handler.h"
 #include "globals.h"
@@ -1021,6 +1022,7 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown
   shutdown_event->view();
   clipboard::watcher::stop();
+  mic::receiver::shutdown();
 #ifdef __linux__
   if (supervised_machine_host) {
     platf::linux_private_display::request_process_shutdown_preserve();

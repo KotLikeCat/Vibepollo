@@ -387,6 +387,13 @@ sunshine_register_component(NAME test_component_clipboard_formats TEST_SOURCE un
 sunshine_register_component(NAME test_component_clipboard_sync_policy TEST_SOURCE unit/test_clipboard_sync_policy.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/sync_policy.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/bundle.cpp")
+find_package(ZLIB REQUIRED)
+sunshine_register_component(NAME test_component_mic_receiver TEST_SOURCE unit/test_mic_receiver.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/mic/receiver.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging_policy.cpp"
+    INCLUDE_DIRECTORIES ${Opus_INCLUDE_DIR}
+    LINK_LIBRARIES ${Opus_LIBRARY} Boost::log Boost::asio Boost::crc Boost::format ZLIB::ZLIB ${SUNSHINE_TEST_SOCKET_LIBRARIES})
 sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/test_remote_session.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/remote_session.cpp")
 sunshine_register_component(NAME test_component_rtsp_pending_policy TEST_SOURCE unit/test_rtsp_pending_policy.cpp
@@ -607,7 +614,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             LINK_LIBRARIES PkgConfig::TEST_PIPEWIRE)
     endif()
 endif()
-find_package(ZLIB REQUIRED)
 sunshine_register_component(NAME test_component_log_sessions TEST_SOURCE unit/test_log_sessions.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp" "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging_policy.cpp"
     DEFINITIONS SUNSHINE_TESTS

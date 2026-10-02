@@ -259,6 +259,8 @@ namespace config {
   struct audio_t {
     std::string sink;
     std::string virtual_sink;
+    bool mic_passthrough;  ///< Accept microphone audio from Moonlight clients and render it into a virtual microphone device
+    std::string mic_sink;  ///< Render endpoint to feed microphone audio into (empty = auto)
     bool stream;
     bool install_steam_drivers;
     bool keep_default;
