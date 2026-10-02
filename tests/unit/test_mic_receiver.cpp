@@ -56,7 +56,7 @@ namespace {
   class MicReceiverTest: public ::testing::Test {
   protected:
     void SetUp() override {
-      mic::receiver::shutdown();
+      mic::receiver::reset_for_tests();
       state = std::make_shared<sink_state_t>();
       mic::receiver::set_sink_factory([s = state]() {
         return std::make_unique<fake_sink>(s);
@@ -67,7 +67,7 @@ namespace {
     }
 
     void TearDown() override {
-      mic::receiver::shutdown();
+      mic::receiver::reset_for_tests();
       if (encoder) {
         opus_encoder_destroy(encoder);
       }
@@ -172,6 +172,47 @@ TEST_F(MicReceiverTest, MalformedPacketsAreIgnored) {
   mic::receiver::submit(1, 0, std::string_view {});
   mic::receiver::submit(1, 1, std::string(2000, 'x'));
   EXPECT_EQ(settle(), 0u);
+}
+
+TEST_F(MicReceiverTest, IdleClosesSinkAndNextPacketReopens) {
+  mic::receiver::set_idle_timeout_for_testing(100ms);
+  send(1, 0);
+  EXPECT_EQ(settle(), 1u);
+  for (int i = 0; i < 100; ++i) {
+    {
+      std::lock_guard lock {state->mutex};
+      if (state->closed == 1) {
+        break;
+      }
+    }
+    std::this_thread::sleep_for(20ms);
+  }
+  {
+    std::lock_guard lock {state->mutex};
+    EXPECT_EQ(state->closed, 1);
+  }
+  send(1, 1);
+  EXPECT_EQ(settle(), 2u);
+  std::lock_guard lock {state->mutex};
+  EXPECT_EQ(state->opened, 2);
+}
+
+TEST_F(MicReceiverTest, NewOwnerStartsFromCleanState) {
+  send(1, 100);
+  EXPECT_EQ(settle(), 1u);
+  mic::receiver::session_ended(1);
+  send(2, 5);  // would be stale vs. seq 100 without a reset
+  send(2, 6);
+  EXPECT_EQ(settle(), 3u);
+}
+
+TEST_F(MicReceiverTest, SubmitAfterShutdownIsIgnored) {
+  send(1, 0);
+  EXPECT_EQ(settle(), 1u);
+  mic::receiver::shutdown();
+  send(1, 1);
+  std::lock_guard lock {state->mutex};
+  EXPECT_EQ(state->writes.size(), 1u);
 }
 
 TEST_F(MicReceiverTest, ShutdownClosesSink) {

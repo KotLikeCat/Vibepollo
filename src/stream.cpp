@@ -1650,7 +1650,7 @@ namespace stream {
       }
 
       constexpr std::size_t header_size = 3;
-      if (payload.size() <= header_size || static_cast<std::uint8_t>(payload[0]) != 1) {
+      if (payload.size() <= header_size || payload.size() - header_size > mic::receiver::max_opus_bytes || static_cast<std::uint8_t>(payload[0]) != 1) {
         BOOST_LOG(debug) << "Dropping malformed microphone packet, size: " << payload.size();
         return;
       }

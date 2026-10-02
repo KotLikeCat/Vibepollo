@@ -17,7 +17,7 @@ namespace mic::receiver {
 
   constexpr int sample_rate = 48000;
   constexpr int frame_samples = 960;  ///< 20 ms at 48 kHz
-  constexpr std::size_t max_opus_bytes = 1275;
+  constexpr std::size_t max_opus_bytes = 200;
 
   /// Sets how the worker creates its sink (called once at startup; defaults to no sink).
   void set_sink_factory(sink_factory_t factory);
@@ -29,8 +29,13 @@ namespace mic::receiver {
   /// Releases ownership when the owning session is torn down.
   void session_ended(std::uint64_t session_id);
 
-  /// Stops the worker thread, closes the sink and clears all state. Restartable.
+  /// Stops and joins the worker thread (closing the sink); later submits are ignored. Call at process exit.
   void shutdown();
+
+  /// Test-only: shuts down, joins and clears all state so the receiver can start again.
+  void reset_for_tests();
+  /// Test-only: shortens the 3 s idle period after which the sink and decoder are closed.
+  void set_idle_timeout_for_testing(std::chrono::milliseconds timeout);
 
   /// Test hook: waits until the queue is drained and the worker is idle.
   bool wait_idle_for_testing(std::chrono::milliseconds timeout);

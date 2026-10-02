@@ -23,13 +23,13 @@ namespace mic::receiver {
     using clock = std::chrono::steady_clock;
 
     constexpr auto owner_silence_timeout = 1s;
-    constexpr auto worker_idle_timeout = 3s;
-    constexpr auto sink_retry_interval = 5s;
+        constexpr auto sink_retry_interval = 5s;
     constexpr auto sink_warning_interval = 60s;
     constexpr std::size_t max_queue = 50;  ///< 1 s of audio; beyond that the worker is stuck, drop
 
     struct packet_t {
       std::uint16_t seq;
+      std::uint64_t generation;
       std::vector<std::uint8_t> data;
     };
 
@@ -45,9 +45,9 @@ namespace mic::receiver {
     sink_factory_t g_factory;
     std::deque<packet_t> g_queue;
     std::thread g_worker;
-    bool g_worker_running = false;  // worker thread is (about to be) active; guarded by g_mutex
-    bool g_worker_done = false;  // worker finished its loop and can be joined; guarded by g_mutex
-    bool g_stop = false;
+    bool g_started = false;  // the persistent worker was started (at most once per process / test reset)
+    bool g_shutdown = false;
+    std::chrono::milliseconds g_idle_timeout = 3s;
     bool g_busy = false;  // worker is processing a packet
     bool g_has_owner = false;
     std::uint64_t g_owner = 0;
@@ -66,6 +66,8 @@ namespace mic::receiver {
       clock::time_point last_warning;
       bool warned = false;
       bool tried_open = false;
+      bool decoder_error_logged = false;
+      clock::time_point last_decoder_error;
     };
 
     void reset_stream(worker_state_t &st) {
@@ -114,7 +116,12 @@ namespace mic::receiver {
         int err = 0;
         st.decoder.reset(opus_decoder_create(sample_rate, 1, &err));
         if (!st.decoder) {
-          BOOST_LOG(error) << "Couldn't create microphone Opus decoder: "sv << opus_strerror(err);
+          const auto now = clock::now();
+          if (!st.decoder_error_logged || now - st.last_decoder_error >= sink_warning_interval) {
+            st.decoder_error_logged = true;
+            st.last_decoder_error = now;
+            BOOST_LOG(error) << "Couldn't create microphone Opus decoder: "sv << opus_strerror(err);
+          }
           return;
         }
       }
@@ -150,40 +157,53 @@ namespace mic::receiver {
       render(st, out.data());
     }
 
+    void close_stream(worker_state_t &st) {
+      if (st.sink_open) {
+        st.sink->close();
+        BOOST_LOG(info) << "Microphone stream closed"sv;
+      }
+      st.sink.reset();
+      st.sink_open = false;
+      st.tried_open = false;
+      st.decoder.reset();
+      st.have_last = false;
+    }
+
+    // Persistent worker: started once per process, joined only by shutdown().
     void worker_main(sink_factory_t factory) {
       worker_state_t st;
       std::unique_lock lock {g_mutex};
-      st.generation = g_owner_generation;
       auto last_activity = clock::now();
-      while (!g_stop) {
+      while (!g_shutdown) {
         if (g_queue.empty()) {
           g_busy = false;
           g_idle_cv.notify_all();
-          if (g_cv.wait_until(lock, last_activity + worker_idle_timeout) == std::cv_status::timeout && g_queue.empty()) {
-            break;
+          const bool open = st.sink_open || st.decoder;
+          if (!open) {
+            g_cv.wait(lock);
+          } else if (g_cv.wait_until(lock, last_activity + g_idle_timeout) == std::cv_status::timeout && g_queue.empty() && !g_shutdown) {
+            lock.unlock();
+            close_stream(st);
+            lock.lock();
           }
           continue;
         }
         auto pkt = std::move(g_queue.front());
         g_queue.pop_front();
         g_busy = true;
-        if (st.generation != g_owner_generation) {
-          st.generation = g_owner_generation;
+        lock.unlock();
+        if (st.generation != pkt.generation) {
+          st.generation = pkt.generation;
           reset_stream(st);
         }
-        lock.unlock();
         process(st, factory, pkt);
         lock.lock();
         last_activity = clock::now();
       }
       g_busy = false;
-      g_worker_done = true;
       g_idle_cv.notify_all();
       lock.unlock();
-      if (st.sink_open) {
-        st.sink->close();
-        BOOST_LOG(info) << "Microphone stream closed"sv;
-      }
+      close_stream(st);
     }
   }  // namespace
 
@@ -196,9 +216,11 @@ namespace mic::receiver {
     if (opus.empty() || opus.size() > max_opus_bytes) {
       return;
     }
-    std::thread finished;
     {
       std::lock_guard lock {g_mutex};
+      if (g_shutdown) {
+        return;
+      }
       const auto now = clock::now();
       if (g_has_owner && g_owner != session_id && now - g_owner_last_packet < owner_silence_timeout) {
         return;
@@ -213,24 +235,14 @@ namespace mic::receiver {
       if (g_queue.size() >= max_queue) {
         return;
       }
-      g_queue.push_back({seq, std::vector<std::uint8_t>(opus.begin(), opus.end())});
+      g_queue.push_back({seq, g_owner_generation, std::vector<std::uint8_t>(opus.begin(), opus.end())});
 
-      if (g_worker_running && g_worker_done) {
-        finished = std::move(g_worker);
-        g_worker_running = false;
-        g_worker_done = false;
-      }
-      if (!g_worker_running) {
-        g_stop = false;
-        g_worker_running = true;
-        g_worker_done = false;
+      if (!g_started) {
+        g_started = true;
         g_worker = std::thread {worker_main, g_factory};
       }
     }
     g_cv.notify_one();
-    if (finished.joinable()) {
-      finished.join();
-    }
   }
 
   void session_ended(std::uint64_t session_id) {
@@ -245,21 +257,30 @@ namespace mic::receiver {
     std::thread worker;
     {
       std::lock_guard lock {g_mutex};
-      g_stop = true;
+      g_shutdown = true;
       worker = std::move(g_worker);
     }
     g_cv.notify_all();
     if (worker.joinable()) {
       worker.join();
     }
+  }
+
+  void reset_for_tests() {
+    shutdown();
     std::lock_guard lock {g_mutex};
     g_queue.clear();
-    g_worker_running = false;
-    g_worker_done = false;
-    g_stop = false;
+    g_started = false;
+    g_shutdown = false;
     g_busy = false;
     g_has_owner = false;
+    g_idle_timeout = 3s;
     ++g_owner_generation;
+  }
+
+  void set_idle_timeout_for_testing(std::chrono::milliseconds timeout) {
+    std::lock_guard lock {g_mutex};
+    g_idle_timeout = timeout;
   }
 
   bool wait_idle_for_testing(std::chrono::milliseconds timeout) {
