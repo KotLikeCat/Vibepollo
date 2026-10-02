@@ -892,6 +892,13 @@ if(WIN32)
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/utf_utils.cpp"
         LINK_LIBRARIES windowscodecs ole32 oleaut32 shlwapi)
     set_tests_properties(test_component_clipboard_win PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
+    sunshine_register_component(NAME test_component_mic_sink TEST_SOURCE unit/platform/windows/test_mic_sink.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/mic_sink.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/utf_utils.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging_policy.cpp"
+        LINK_LIBRARIES ole32 oleaut32 Boost::log Boost::asio Boost::crc Boost::format ZLIB::ZLIB ${SUNSHINE_TEST_SOCKET_LIBRARIES})
+    set_tests_properties(test_component_mic_sink PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
     sunshine_register_component(NAME test_component_clipboard_helper TEST_SOURCE unit/platform/windows/test_clipboard_helper.cpp
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/clipboard_win.cpp"
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/formats.cpp"
