@@ -11,6 +11,7 @@
 #include <array>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <atomic>
 #include <string>
@@ -26,6 +27,8 @@ namespace mic::receiver {
     constexpr auto owner_silence_timeout = 1s;
     constexpr auto sink_warning_interval = 60s;
     std::atomic<std::chrono::milliseconds::rep> g_sink_retry_ms {5000};
+    constexpr auto slow_open_threshold = 50ms;  ///< an open() slower than this leaves a stale backlog behind
+    constexpr std::size_t keep_after_open = 2;  ///< newest packets kept after a slow open
     constexpr std::size_t max_queue = 50;  ///< 1 s of audio; beyond that the worker is stuck, drop
 
     struct packet_t {
@@ -53,6 +56,9 @@ namespace mic::receiver {
     bool g_has_owner = false;
     std::uint64_t g_owner = 0;
     clock::time_point g_owner_last_packet;
+    std::function<void()> g_worker_init;
+    clock::time_point g_rate_window_start;
+    int g_rate_count = 0;
     std::uint64_t g_owner_generation = 0;  // bumped whenever ownership changes; the worker resets its seq state
 
     // Worker-only state.
@@ -185,6 +191,14 @@ namespace mic::receiver {
     // Persistent worker: started once per process, joined only by shutdown().
     void worker_main(sink_factory_t factory) {
       worker_state_t st;
+      std::function<void()> init;
+      {
+        std::lock_guard guard {g_mutex};
+        init = g_worker_init;
+      }
+      if (init) {
+        init();
+      }
       std::unique_lock lock {g_mutex};
       auto last_activity = clock::now();
       while (!g_shutdown) {
@@ -205,6 +219,25 @@ namespace mic::receiver {
         g_queue.pop_front();
         g_busy = true;
         lock.unlock();
+        if (!st.sink_open) {
+          const auto open_started = clock::now();
+          if (ensure_sink(st, factory) && clock::now() - open_started >= slow_open_threshold) {
+            // The sink was slow to open: everything queued meanwhile is stale. Keep only the newest packets.
+            lock.lock();
+            while (g_queue.size() > keep_after_open) {
+              g_queue.pop_front();
+            }
+            if (g_queue.size() == keep_after_open) {
+              pkt = std::move(g_queue.front());
+              g_queue.pop_front();
+            }
+            lock.unlock();
+            st.have_last = false;
+            if (st.decoder) {
+              opus_decoder_ctl(st.decoder.get(), OPUS_RESET_STATE);
+            }
+          }
+        }
         if (st.generation != pkt.generation) {
           st.generation = pkt.generation;
           reset_stream(st);
@@ -225,6 +258,11 @@ namespace mic::receiver {
     g_factory = std::move(factory);
   }
 
+  void set_worker_init(std::function<void()> init) {
+    std::lock_guard lock {g_mutex};
+    g_worker_init = std::move(init);
+  }
+
   void submit(std::uint64_t session_id, std::uint16_t seq, std::string_view opus) {
     if (opus.empty() || opus.size() > max_opus_bytes) {
       return;
@@ -242,8 +280,18 @@ namespace mic::receiver {
         g_has_owner = true;
         g_owner = session_id;
         ++g_owner_generation;
+        g_rate_count = 0;
       }
       g_owner_last_packet = now;
+
+      // Per-owner rate cap: at most max_packets_per_second packets in any 1 s window.
+      if (g_rate_count == 0 || now - g_rate_window_start >= 1s) {
+        g_rate_window_start = now;
+        g_rate_count = 0;
+      }
+      if (++g_rate_count > max_packets_per_second) {
+        return;
+      }
 
       if (g_queue.size() >= max_queue) {
         return;
@@ -287,6 +335,8 @@ namespace mic::receiver {
     g_shutdown = false;
     g_busy = false;
     g_has_owner = false;
+    g_rate_count = 0;
+    g_worker_init = nullptr;
     g_idle_timeout = 3s;
     g_sink_retry_ms = 5000;
     ++g_owner_generation;

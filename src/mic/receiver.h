@@ -18,9 +18,13 @@ namespace mic::receiver {
   constexpr int sample_rate = 48000;
   constexpr int frame_samples = 960;  ///< 20 ms at 48 kHz
   constexpr std::size_t max_opus_bytes = 200;
+  constexpr int max_packets_per_second = 60;  ///< per-owner cap (the client sends 50/s)
 
   /// Sets how the worker creates its sink (called once at startup; defaults to no sink).
   void set_sink_factory(sink_factory_t factory);
+
+  /// Sets a function run once at the start of the worker thread (e.g. to raise its priority).
+  void set_worker_init(std::function<void()> init);
 
   /// Queues one Opus packet from `session_id`. Never blocks on decoding or device I/O.
   /// Packets from another session are dropped while the owner is active.

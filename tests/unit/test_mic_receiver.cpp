@@ -24,6 +24,7 @@ namespace {
     int opened = 0;
     int closed = 0;
     std::vector<std::size_t> writes;  // frames per write call
+    std::chrono::milliseconds open_delay {0};
     int fail_after_writes = -1;  // write() returns false once after this many successful writes (-1 = never)
   };
 
@@ -34,6 +35,14 @@ namespace {
     }
 
     bool open() override {
+      std::chrono::milliseconds delay;
+      {
+        std::lock_guard lock {state_->mutex};
+        delay = state_->open_delay;
+      }
+      if (delay.count() > 0) {
+        std::this_thread::sleep_for(delay);
+      }
       std::lock_guard lock {state_->mutex};
       ++state_->opened;
       return true;
@@ -251,4 +260,24 @@ TEST_F(MicReceiverTest, FailedWriteClosesAndReopensSink) {
   std::lock_guard lock {state->mutex};
   EXPECT_EQ(state->opened, 2);
   EXPECT_GE(state->writes.size(), 2u);
+}
+
+TEST_F(MicReceiverTest, SlowOpenKeepsOnlyNewestTwoQueuedFrames) {
+  {
+    std::lock_guard lock {state->mutex};
+    state->open_delay = 300ms;
+  }
+  for (std::uint16_t i = 0; i < 10; ++i) {
+    send(1, i);
+  }
+  EXPECT_EQ(settle(), 2u);
+}
+
+TEST_F(MicReceiverTest, PerOwnerRateCapDropsExcessPackets) {
+  for (std::uint16_t i = 0; i < 100; ++i) {
+    send(1, i);
+  }
+  const auto written = settle();
+  EXPECT_LE(written, static_cast<std::size_t>(mic::receiver::max_packets_per_second) + 1);
+  EXPECT_GE(written, 1u);
 }

@@ -1022,7 +1022,6 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown
   shutdown_event->view();
   clipboard::watcher::stop();
-  mic::receiver::shutdown();
 #ifdef __linux__
   if (supervised_machine_host) {
     platf::linux_private_display::request_process_shutdown_preserve();
@@ -1033,6 +1032,9 @@ int main(int argc, char *argv[]) {
   // The signal handler only wakes main; start the owned watchdog here so it
   // never constructs threads or queues work from signal context.
   shutdown_deadline.arm();
+
+  // Joins the mic worker, which may be inside a stuck WASAPI call; the watchdog above bounds the wait.
+  mic::receiver::shutdown();
 
 #ifdef WIN32
   // Join the hidden shutdown-notification window while the deadline watchdog

@@ -50,6 +50,7 @@ namespace {
   constexpr int sample_rate = 48000;
   constexpr REFERENCE_TIME buffer_100ns = 100 * 10000;  // 100 ms
   constexpr UINT32 prebuffer_frames = sample_rate * 40 / 1000;
+  constexpr UINT32 drop_high_frames = sample_rate * 60 / 1000;
 
   /// Initialises COM for the calling thread for the lifetime of the object.
   class com_scope {
@@ -183,6 +184,8 @@ namespace {
         return false;
       }
 
+      warn_if_default_render(en.get(), infos[idx]);
+
       IAudioClient *ac = nullptr;
       if (FAILED(devices[idx]->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&ac))) || !ac) {
         return false;
@@ -223,6 +226,7 @@ namespace {
       render_.reset(rc);
 
       started_ = false;
+      dropping_ = false;
       // Prebuffer silence so the first real frames do not underrun, then start.
       if (!push_silence(prebuffer_frames)) {
         return false;
@@ -249,7 +253,23 @@ namespace {
         handle_failure(hr);
         return false;
       }
-      // Latency bound: the 100 ms endpoint buffer caps queued audio, so drop the frame rather than overflow.
+      // Latency bound (target 40 ms): above 60 ms drop incoming frames until the backlog drains below 40 ms.
+      if (padding > drop_high_frames) {
+        dropping_ = true;
+      } else if (padding < prebuffer_frames) {
+        dropping_ = false;
+      }
+      if (dropping_) {
+        return true;
+      }
+      // Underrun after Start(): re-prebuffer 40 ms of silence so playback does not stutter on every frame.
+      if (padding == 0 && prebuffer_frames + frames <= buffer_frames_ && !push_silence(prebuffer_frames)) {
+        handle_failure(E_FAIL);
+        return false;
+      }
+      if (padding == 0) {
+        padding = prebuffer_frames;
+      }
       if (padding + frames > buffer_frames_) {
         return true;
       }
@@ -284,6 +304,31 @@ namespace {
     }
 
   private:
+    /// Host audio would be sent into the microphone if the sink endpoint is a default playback device. Warn once.
+    void warn_if_default_render(IMMDeviceEnumerator *en, const endpoint_info &sink) {
+      if (warned_default_) {
+        return;
+      }
+      for (const auto role : {eConsole, eMultimedia, eCommunications}) {
+        IMMDevice *d = nullptr;
+        if (FAILED(en->GetDefaultAudioEndpoint(eRender, role, &d)) || !d) {
+          continue;
+        }
+        com_ptr<IMMDevice> dev(d);
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(dev->GetId(&id)) && id) {
+          const bool same = sink.id == id;
+          CoTaskMemFree(id);
+          if (same) {
+            warned_default_ = true;
+            BOOST_LOG(warning) << "mic sink: '"sv << utf_utils::to_utf8(sink.friendly)
+                               << "' is the default playback device; host audio will be sent into the microphone"sv;
+            return;
+          }
+        }
+      }
+    }
+
     bool push_silence(UINT32 frames) {
       BYTE *data = nullptr;
       if (FAILED(render_->GetBuffer(frames, &data)) || !data) {
@@ -309,6 +354,8 @@ namespace {
     UINT32 buffer_frames_ = 0;
     bool started_ = false;
     bool opened_ = false;
+    bool warned_default_ = false;
+    bool dropping_ = false;
   };
 }  // namespace
 
@@ -334,6 +381,26 @@ namespace platf::mic_win {
       }
     }
     return -1;
+  }
+
+  bool is_mic_endpoint(const std::vector<endpoint_info> &infos, const std::string &name, const std::wstring &id) {
+    if (id.empty()) {
+      return false;
+    }
+    const int idx = select_endpoint(infos, name);
+    return idx >= 0 && infos[idx].id == id;
+  }
+
+  bool is_mic_endpoint_id(const std::string &name, const std::wstring &id) {
+    auto en = make_enumerator();
+    if (!en) {
+      return false;
+    }
+    std::vector<endpoint_info> infos;
+    if (!enumerate(en.get(), infos, nullptr)) {
+      return false;
+    }
+    return is_mic_endpoint(infos, name, id);
   }
 
   std::optional<std::string> resolve_endpoint_name(const std::string &name_or_empty, bool *audio_present) {

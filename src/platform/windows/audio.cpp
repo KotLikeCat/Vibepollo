@@ -35,6 +35,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/windows/mic_sink_win.h"
 #include "utf_utils.h"
 
 // Must be the last included file
@@ -1494,6 +1495,18 @@ namespace platf::audio {
     }
 
     /**
+     * @brief True when the endpoint is the render side of the virtual microphone (the one the mic sink feeds).
+     * Such an endpoint must never become the host's default playback device, or all host audio would be
+     * sent into the microphone. Never true for the Steam Streaming Speakers endpoint itself.
+     */
+    bool is_mic_sink_endpoint(const std::wstring &device_id) {
+      if (device_id.empty()) {
+        return false;
+      }
+      return ::platf::mic_win::is_mic_endpoint_id(config::audio.mic_sink, device_id);
+    }
+
+    /**
      * @brief Resets the default audio device from Steam Streaming Speakers.
      * If a preferred device is supplied, tries to restore that exact device,
      * keeping a background retry active if it is temporarily missing (e.g.,
@@ -2419,6 +2432,12 @@ namespace platf::audio {
 
       const auto &resolved_id = matched->second;
 
+      // Never restore the virtual microphone as the playback default.
+      if (is_mic_sink_endpoint(resolved_id)) {
+        BOOST_LOG(warning) << "Not restoring the virtual microphone endpoint as the default audio device"sv;
+        return reset_result_e::no_device;
+      }
+
       int failure = 0;
       int restored = 0;
       for (const auto role : steam_roles) {
@@ -2574,6 +2593,15 @@ namespace platf::audio {
       }
       const auto show_status = show_steam_endpoint_with_retry(steam_device_id);
 
+      // Windows may have picked the virtual microphone as the replacement; it is not an eligible default.
+      std::array<bool, static_cast<std::size_t>(ERole_enum_count)> fallback_is_mic {};
+      if (SUCCEEDED(hide_status)) {
+        for (const auto role : steam_roles) {
+          const auto &candidate = fallback_device_ids[role_index(role)];
+          fallback_is_mic[role_index(role)] = !candidate.empty() && is_mic_sink_endpoint(candidate);
+        }
+      }
+
       const bool assignment_active =
         stop_token ?
           pending_restore_worker_can_write(*stop_token, token, assignment_epoch) :
@@ -2600,6 +2628,28 @@ namespace platf::audio {
       bool no_device = false;
       int failure = 0;
       for (const auto role : steam_roles) {
+        // Windows picked the virtual microphone while Steam was hidden. Keep the
+        // previous default (Steam speakers) instead of routing host audio into it.
+        if (fallback_is_mic[role_index(role)] &&
+            is_default_device(fallback_device_ids[role_index(role)], role)) {
+          BOOST_LOG(warning) << "The only replacement default audio device is the virtual microphone; keeping Steam Streaming Speakers"sv;
+          std::optional<HRESULT> keep_result;
+          if (stop_token) {
+            keep_result = set_default_endpoint_for_worker(*stop_token, token, assignment_epoch, role, steam_device_id);
+          } else {
+            keep_result = set_default_endpoint_for_assignment(assignment_epoch, role, steam_device_id);
+          }
+          if (!keep_result) {
+            return reset_result_e::inactive;
+          }
+          if (FAILED(*keep_result)) {
+            ++failure;
+          } else {
+            no_device = true;
+          }
+          continue;
+        }
+
         // Windows may have kept the endpoint it selected while Steam was
         // hidden, or the user may have picked another device. Adopt that newer
         // default for this role instead of replacing it with the fallback.
@@ -2615,7 +2665,7 @@ namespace platf::audio {
         }
 
         const auto &new_default_id = fallback_device_ids[role_index(role)];
-        if (new_default_id.empty()) {
+        if (new_default_id.empty() || fallback_is_mic[role_index(role)]) {
           no_device = true;
           continue;
         }
@@ -2783,6 +2833,12 @@ namespace platf::audio {
         return role_restore_result_e::no_device;
       }
 
+      // Never restore the virtual microphone as the playback default.
+      if (is_mic_sink_endpoint(matched->second)) {
+        BOOST_LOG(warning) << "Not restoring the virtual microphone endpoint as the default audio device"sv;
+        return role_restore_result_e::no_device;
+      }
+
       // The user may have selected another device while the preferred endpoint
       // was being re-enumerated. Never write over that newer choice.
       if (!is_default_device(role_restore.expected_current_id, role_restore.role)) {
@@ -2898,6 +2954,14 @@ namespace platf::audio {
       // Always re-enable Steam after hiding it, even if cancellation races
       // with the fallback or the hide call reports failure.
       const auto show_status = show_steam_endpoint_with_retry(steam_device_id);
+
+      // Windows may have picked the virtual microphone as the replacement; it is not an eligible default.
+      std::vector<bool> fallback_is_mic(role_restores.size(), false);
+      if (SUCCEEDED(hide_status)) {
+        for (const auto index : steam_role_indexes) {
+          fallback_is_mic[index] = !fallback_device_ids[index].empty() && is_mic_sink_endpoint(fallback_device_ids[index]);
+        }
+      }
       if (!pending_restore_worker_can_write(stop_token, token, assignment_epoch)) {
         reassert_current_policy_assignment();
         return reset_result_e::inactive;
@@ -2926,6 +2990,32 @@ namespace platf::audio {
 
         auto &role_restore = role_restores[index];
         const auto &fallback_device_id = fallback_device_ids[index];
+
+        if (fallback_is_mic[index] && is_default_device(fallback_device_id, role_restore.role)) {
+          // Put the role back on Steam speakers rather than leaving host audio in the virtual microphone.
+          BOOST_LOG(warning) << "The only replacement default audio device is the virtual microphone; keeping Steam Streaming Speakers"sv;
+          auto keep_result = set_default_endpoint_for_worker(
+            stop_token,
+            token,
+            assignment_epoch,
+            role_restore.role,
+            steam_device_id
+          );
+          if (!keep_result) {
+            return reset_result_e::inactive;
+          }
+          role_restore.fallback_transition = false;
+          if (!update_pending_role_restore_for_worker(role_restore, token, assignment_epoch)) {
+            reassert_current_policy_assignment_role(role_restore.role);
+            return reset_result_e::inactive;
+          }
+          if (FAILED(*keep_result)) {
+            ++failure;
+          } else {
+            no_device = true;
+          }
+          continue;
+        }
 
         if (!is_default_device(steam_device_id, role_restore.role)) {
           // Windows may have kept the endpoint it selected while Steam was
@@ -2959,7 +3049,7 @@ namespace platf::audio {
           continue;
         }
 
-        if (fallback_device_id.empty()) {
+        if (fallback_device_id.empty() || fallback_is_mic[index]) {
           role_restore.fallback_transition = false;
           if (!update_pending_role_restore_for_worker(
                 role_restore,

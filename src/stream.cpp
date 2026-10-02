@@ -604,6 +604,7 @@ namespace stream {
     std::uint64_t remote_role_generation {};
     bool input_only {};
     bool audio_disabled {};
+    bool mic_denied_logged {};  ///< control thread only: the microphone permission denial was logged at warning once
     std::atomic_bool client_disconnected {false};
 
     safe::mail_t mail;
@@ -1637,6 +1638,9 @@ namespace stream {
     mic::receiver::set_sink_factory([]() {
       return platf::create_mic_sink(config::audio.mic_sink);
     });
+    mic::receiver::set_worker_init([]() {
+      platf::adjust_thread_priority(platf::thread_priority_e::high);
+    });
 
     // Microphone audio: u8 version (1), u16 LE seq, then one Opus packet (48 kHz mono, 20 ms).
     server->map(packetTypes[IDX_MIC_AUDIO], [](session_t *session, const std::string_view &payload) {
@@ -1644,8 +1648,20 @@ namespace stream {
         return;
       }
 
+      // Microphone audio is only accepted from the encrypted control stream (call() already drops unencrypted
+      // packets when controlProtocolType == 13; the legacy protocol has no encryption at all).
+      if (session->config.controlProtocolType != 13) {
+        BOOST_LOG(debug) << "Dropping microphone packet: control stream is not encrypted";
+        return;
+      }
+
       if (!(session->permission & crypto::PERM::_all_inputs)) {
-        BOOST_LOG(debug) << "Microphone audio denied for [" << session->device_name << "]: no input permission";
+        if (!session->mic_denied_logged) {
+          session->mic_denied_logged = true;
+          BOOST_LOG(warning) << "Microphone audio denied for [" << session->device_name << "]: no input permission";
+        } else {
+          BOOST_LOG(debug) << "Microphone audio denied for [" << session->device_name << "]: no input permission";
+        }
         return;
       }
 

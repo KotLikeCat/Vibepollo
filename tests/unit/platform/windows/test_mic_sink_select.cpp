@@ -41,3 +41,23 @@ TEST(MicSinkSelect, CaseInsensitiveAndExplicitName) {
   EXPECT_EQ(platf::mic_win::select_endpoint(all, "vb-audio"), 1);
   EXPECT_EQ(platf::mic_win::select_endpoint(all, "nope"), -1);
 }
+
+TEST(MicSinkSelect, MicEndpointIsNotAnEligibleDefaultWhenResettingFromSteamSpeakers) {
+  const std::vector<endpoint_info> all = {
+    {L"{steam-speakers}", L"Speakers (Steam Streaming Speakers)", L"", L""},
+    {L"{steam-mic}", L"Speakers (Steam Streaming Microphone)", L"", L""},
+  };
+  // The only replacement for Steam Speakers is the mic's render side: it must be classified as the mic sink.
+  EXPECT_TRUE(platf::mic_win::is_mic_endpoint(all, "", L"{steam-mic}"));
+  EXPECT_FALSE(platf::mic_win::is_mic_endpoint(all, "", L"{steam-speakers}"));
+  EXPECT_FALSE(platf::mic_win::is_mic_endpoint(all, "", L""));
+  EXPECT_FALSE(platf::mic_win::is_mic_endpoint(all, "", L"{unknown}"));
+
+  // Explicit mic_sink name selects the same endpoint the sink would use.
+  const std::vector<endpoint_info> with_cable = {
+    {L"{real}", L"Speakers (Realtek)", L"", L""},
+    {L"{cable}", L"CABLE Input (VB-Audio Virtual Cable)", L"", L""},
+  };
+  EXPECT_TRUE(platf::mic_win::is_mic_endpoint(with_cable, "vb-audio", L"{cable}"));
+  EXPECT_FALSE(platf::mic_win::is_mic_endpoint(with_cable, "vb-audio", L"{real}"));
+}

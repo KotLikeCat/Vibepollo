@@ -21,6 +21,18 @@ namespace platf::mic_win {
   int select_endpoint(const std::vector<endpoint_info> &infos, const std::string &name);
 
   /**
+   * @brief True when the endpoint with this id is the one the sink would feed for the configured name (or the auto rule).
+   *        audio.cpp uses it so a default-device reset never picks the virtual microphone as the host's playback device.
+   */
+  bool is_mic_endpoint(const std::vector<endpoint_info> &infos, const std::string &name, const std::wstring &id);
+
+  /**
+   * @brief Same as above, enumerating the active render endpoints (needs COM initialised on the calling thread).
+   * @return false when the endpoint cannot be determined to be the mic sink (including enumeration failure).
+   */
+  bool is_mic_endpoint_id(const std::string &name, const std::wstring &id);
+
+  /**
    * @brief Resolve the render endpoint that the sink would use.
    * @param name_or_empty Non-empty: case-insensitive "contains" match on id/friendly name/description/adapter name.
    *                      Empty: first of "Steam Streaming Microphone", "CABLE Input". Never a real speaker.
