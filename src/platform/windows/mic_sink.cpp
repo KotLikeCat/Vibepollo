@@ -44,6 +44,9 @@ namespace {
   const PROPERTYKEY key_description = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2};
   const PROPERTYKEY key_adapter_name = {{0x026e516e, 0xb814, 0x414b, {0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22}}, 2};
 
+  // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, defined locally to avoid needing INITGUID/ksguid linkage.
+  const GUID subtype_ieee_float = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+
   constexpr int sample_rate = 48000;
   constexpr REFERENCE_TIME buffer_100ns = 100 * 10000;  // 100 ms
   constexpr UINT32 prebuffer_frames = sample_rate * 40 / 1000;
@@ -216,7 +219,7 @@ namespace {
       fmt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
       fmt.Samples.wValidBitsPerSample = 32;
       fmt.dwChannelMask = SPEAKER_FRONT_CENTER;
-      fmt.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+      fmt.SubFormat = subtype_ieee_float;
 
       const HRESULT hr = client_->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
