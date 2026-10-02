@@ -136,7 +136,7 @@ TEST(MicSinkLatency, UnderrunRaisesTargetAndPrebuffersIt) {
   EXPECT_EQ(a.what, kind::prebuffer_then_write);
   EXPECT_EQ(a.frames, ms(60));
   EXPECT_EQ(c.target_frames(), ms(60));
-  a = c.on_write(0, t0 + std::chrono::seconds(1));
+  a = c.on_write(0, t0 + std::chrono::milliseconds(50));
   EXPECT_EQ(a.frames, ms(80));
 }
 
@@ -144,10 +144,10 @@ TEST(MicSinkLatency, TargetCapsAt120ms) {
   latency_controller c(rate);
   auto t = clk::now();
   for (int i = 0; i < 20; ++i) {
-    c.on_write(0, t += std::chrono::seconds(1));
+    c.on_write(0, t += std::chrono::milliseconds(50));
   }
   EXPECT_EQ(c.target_frames(), ms(120));
-  EXPECT_EQ(c.on_write(0, t + std::chrono::seconds(1)).frames, ms(120));
+  EXPECT_EQ(c.on_write(0, t + std::chrono::milliseconds(50)).frames, ms(120));
 }
 
 TEST(MicSinkLatency, DecaysAfter30sWithoutUnderrunsNotBelow40ms) {
@@ -172,6 +172,7 @@ TEST(MicSinkLatency, UnderrunResetsCalmTimer) {
   latency_controller c(rate);
   const auto t0 = clk::now();
   c.on_write(0, t0);  // 60 ms
+  c.on_write(ms(40), t0 + std::chrono::seconds(20) - std::chrono::milliseconds(20));
   c.on_write(0, t0 + std::chrono::seconds(20));  // 80 ms
   c.on_write(ms(80), t0 + std::chrono::seconds(45));  // only 25 s since the last underrun
   EXPECT_EQ(c.target_frames(), ms(80));
