@@ -119,9 +119,11 @@ add_executable(sunshine_clipboard_helper
         ${CMAKE_SOURCE_DIR}/src/clipboard/bundle.cpp
         ${CMAKE_SOURCE_DIR}/src/clipboard/formats.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_win.cpp
-        ${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.cpp)
+        ${TOOL_SOURCES})
 set_target_properties(sunshine_clipboard_helper PROPERTIES CXX_STANDARD 23)
 target_link_libraries(sunshine_clipboard_helper
+        ${Boost_LIBRARIES}
+        ${CMAKE_THREAD_LIBS_INIT}
         windowscodecs
         ole32
         oleaut32
