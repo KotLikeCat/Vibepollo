@@ -8,8 +8,10 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <chrono>
 #include <format>
 #include <memory>
+#include <thread>
 #include <vector>
 
 // platform includes
@@ -173,31 +175,34 @@ namespace {
    * conversion, so a render format different from the capture format changes pitch (and clicks). Align the render
    * endpoint's device format with the paired capture endpoint's before the stream is initialised.
    */
-  void align_with_paired_capture(IMMDeviceEnumerator *en, const endpoint_info &render, IMMDevice *render_dev) {
+  bool align_with_paired_capture(IMMDeviceEnumerator *en, const endpoint_info &render, IMMDevice *render_dev) {
+    if (!platf::mic_win::is_known_virtual_cable(render)) {
+      return false;
+    }
     std::vector<endpoint_info> caps;
     std::vector<com_ptr<IMMDevice>> cap_devs;
     if (!enumerate(en, caps, &cap_devs, eCapture)) {
-      return;
+      return false;
     }
     const int ci = platf::mic_win::find_paired_capture(caps, render);
     if (ci < 0) {
-      return;
+      return false;
     }
     auto cap_fmt = device_format(cap_devs[ci].get());
     auto render_fmt = device_format(render_dev);
     if (cap_fmt.empty()) {
-      return;
+      return false;
     }
     const auto &cf = *reinterpret_cast<const WAVEFORMATEX *>(cap_fmt.data());
     if (!render_fmt.empty() && !platf::mic_win::formats_differ(cf, *reinterpret_cast<const WAVEFORMATEX *>(render_fmt.data()))) {
-      return;
+      return false;
     }
     IPolicyConfig *raw = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_CPolicyConfigClient, nullptr, CLSCTX_ALL, IID_IPolicyConfig, reinterpret_cast<void **>(&raw));
     if (FAILED(hr) || !raw) {
       BOOST_LOG(warning) << "mic sink: cannot align '"sv << utf_utils::to_utf8(render.friendly) << "' with '"sv << utf_utils::to_utf8(caps[ci].friendly)
                          << "' (policy config unavailable [0x"sv << util::hex(hr).to_string_view() << "]); microphone pitch will be wrong"sv;
-      return;
+      return false;
     }
     com_ptr<IPolicyConfig> policy(raw);
     // Undocumented API: pass copies, never the property-store buffers.
@@ -208,10 +213,24 @@ namespace {
     if (FAILED(hr)) {
       BOOST_LOG(warning) << "mic sink: cannot align '"sv << utf_utils::to_utf8(render.friendly) << "' with '"sv << utf_utils::to_utf8(caps[ci].friendly)
                          << "' [0x"sv << util::hex(hr).to_string_view() << "]; microphone pitch will be wrong"sv;
-      return;
+      return false;
     }
     BOOST_LOG(info) << "mic sink: aligned '"sv << utf_utils::to_utf8(render.friendly) << "' format to '"sv << utf_utils::to_utf8(caps[ci].friendly) << "' ("sv
                     << platf::mic_win::format_to_string(cf) << ')';
+    // The audio engine applies the change asynchronously: wait until the endpoint reports the new format.
+    const auto t0 = std::chrono::steady_clock::now();
+    bool settled = false;
+    for (int i = 0; i < 10; ++i) {
+      auto cur = device_format(render_dev);  // fresh property store read each time
+      if (!cur.empty() && !platf::mic_win::formats_differ(cf, *reinterpret_cast<const WAVEFORMATEX *>(cur.data()))) {
+        settled = true;
+        break;
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    BOOST_LOG(debug) << "mic sink: format change "sv << (settled ? "settled"sv : "not confirmed"sv) << " after "sv
+                     << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << " ms"sv;
+    return true;
   }
 
   int select(const std::vector<endpoint_info> &infos, const std::string &name) {
@@ -258,8 +277,9 @@ namespace {
       }
 
       warn_if_default_render(en.get(), infos[idx]);
-      align_with_paired_capture(en.get(), infos[idx], devices[idx].get());
+      const bool aligned = align_with_paired_capture(en.get(), infos[idx], devices[idx].get());
 
+      auto init_client = [&]() -> bool {
       IAudioClient *ac = nullptr;
       if (FAILED(devices[idx]->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&ac))) || !ac) {
         return false;
@@ -289,6 +309,19 @@ namespace {
       if (FAILED(hr)) {
         BOOST_LOG(warning) << "mic sink: IAudioClient::Initialize failed [0x"sv << util::hex(hr).to_string_view() << ']';
         return false;
+      }
+      return true;
+      };
+      if (!init_client()) {
+        if (!aligned) {
+          return false;
+        }
+        // The engine may still be reconfiguring after the format change: retry once with a fresh client.
+        client_.reset();
+        std::this_thread::sleep_for(200ms);
+        if (!init_client()) {
+          return false;
+        }
       }
       if (FAILED(client_->GetBufferSize(&buffer_frames_))) {
         return false;
@@ -328,13 +361,13 @@ namespace {
         return false;
       }
       // Adaptive latency: drop above target + 40 ms, re-prebuffer `target` after an underrun (padding == 0).
-      const auto old_target_ms = latency_.target_ms();
       const auto act = latency_.on_write(padding, latency_controller::clock::now());
-      if (latency_.target_ms() != old_target_ms) {
+      if (latency_.target_ms() != logged_target_ms_) {
         const auto now = latency_controller::clock::now();
         if (now - last_target_log_ >= 2s) {
           last_target_log_ = now;
-          BOOST_LOG(info) << "mic sink: latency target "sv << old_target_ms << " -> "sv << latency_.target_ms() << " ms"sv;
+          BOOST_LOG(info) << "mic sink: latency target "sv << logged_target_ms_ << " -> "sv << latency_.target_ms() << " ms"sv;
+          logged_target_ms_ = latency_.target_ms();
         }
       }
       if (act.what == latency_controller::kind::drop) {
@@ -437,6 +470,7 @@ namespace {
     bool warned_default_ = false;
     latency_controller latency_ {sample_rate};
     latency_controller::clock::time_point last_target_log_ {};
+    std::uint32_t logged_target_ms_ = latency_controller::min_ms;
   };
 }  // namespace
 
@@ -462,6 +496,15 @@ namespace platf::mic_win {
       }
     }
     return -1;
+  }
+
+  bool is_known_virtual_cable(const endpoint_info &e) {
+    for (const auto *needle : {L"steam streaming microphone", L"vb-audio"}) {
+      if (contains_ci(e.adapter, needle) || contains_ci(e.friendly, needle) || contains_ci(e.desc, needle)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   int find_paired_capture(const std::vector<endpoint_info> &captures, const endpoint_info &render) {
@@ -504,9 +547,18 @@ namespace platf::mic_win {
     dropping_ = false;
     last_event_ = now;
     has_event_ = true;
+    has_write_ = false;
   }
 
   latency_controller::action latency_controller::on_write(std::uint32_t padding, clock::time_point now) {
+    const bool idle_gap = has_write_ && now - last_write_ > idle_gap_limit;
+    has_write_ = true;
+    last_write_ = now;
+    if (padding == 0 && idle_gap) {
+      // The client paused (muted, network stall): not an underrun, only rebuild the buffer at the current target.
+      dropping_ = false;
+      return {kind::prebuffer_then_write, target_};
+    }
     if (padding == 0) {
       // Underrun: be more conservative from now on and rebuild the buffer.
       target_ = std::min(target_ + frames_of(raise_step_ms), frames_of(max_ms));

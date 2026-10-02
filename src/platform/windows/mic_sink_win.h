@@ -60,6 +60,9 @@ namespace platf::mic_win {
    */
   bool formats_differ(const WAVEFORMATEX &a, const WAVEFORMATEX &b);
 
+  /// True for the known virtual audio cables (Steam Streaming Microphone, VB-Audio); only those get their format rewritten.
+  bool is_known_virtual_cable(const endpoint_info &e);
+
   /// Human readable format, e.g. "1ch 44100 Hz 32-bit float".
   std::string format_to_string(const WAVEFORMATEX &f);
 
@@ -113,6 +116,8 @@ namespace platf::mic_win {
     static constexpr std::uint32_t lower_step_ms = 10;
     static constexpr std::uint32_t drop_margin_ms = 40;
     static constexpr std::chrono::seconds calm_period {30};
+    /// A write after a longer pause than this with an empty buffer is a restart, not an underrun.
+    static constexpr std::chrono::milliseconds idle_gap_limit {100};
 
   private:
     std::uint32_t frames_of(std::uint32_t ms) const {
@@ -122,6 +127,8 @@ namespace platf::mic_win {
     std::uint32_t rate_;
     std::uint32_t target_;
     bool dropping_ = false;
+    bool has_write_ = false;
+    clock::time_point last_write_ {};
     bool has_event_ = false;
     clock::time_point last_event_ {};  ///< last underrun, decay step or restart
   };

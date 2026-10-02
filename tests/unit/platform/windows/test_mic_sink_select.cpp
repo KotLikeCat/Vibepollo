@@ -188,3 +188,37 @@ TEST(MicSinkLatency, DropHysteresis) {
   EXPECT_EQ(c.on_write(ms(39), t0).what, kind::write);
   EXPECT_EQ(c.on_write(ms(60), t0).what, kind::write);
 }
+
+TEST(MicSinkLatency, IdleGapIsNotAnUnderrun) {
+  latency_controller c(rate);
+  const auto t0 = clk::now();
+  EXPECT_EQ(c.on_write(ms(40), t0).what, kind::write);
+  const auto a = c.on_write(0, t0 + std::chrono::milliseconds(500));  // client was muted
+  EXPECT_EQ(a.what, kind::prebuffer_then_write);
+  EXPECT_EQ(a.frames, ms(40));
+  EXPECT_EQ(c.target_frames(), ms(40));
+}
+
+TEST(MicSinkLatency, RealUnderrunStillRaisesTarget) {
+  latency_controller c(rate);
+  const auto t0 = clk::now();
+  c.on_write(ms(10), t0);
+  const auto a = c.on_write(0, t0 + std::chrono::milliseconds(30));
+  EXPECT_EQ(a.frames, ms(60));
+  EXPECT_EQ(c.target_frames(), ms(60));
+}
+
+TEST(MicSinkLatency, RestartKeepsLearnedTarget) {
+  latency_controller c(rate);
+  const auto t0 = clk::now();
+  c.on_write(0, t0);
+  ASSERT_EQ(c.target_frames(), ms(60));
+  c.restart(t0 + std::chrono::seconds(1));
+  EXPECT_EQ(c.target_frames(), ms(60));
+}
+
+TEST(MicSinkPairing, OnlyKnownVirtualCablesAreRealigned) {
+  EXPECT_TRUE(platf::mic_win::is_known_virtual_cable({L"{a}", L"Speakers (Steam Streaming Microphone)", L"", L"Steam Streaming Microphone"}));
+  EXPECT_TRUE(platf::mic_win::is_known_virtual_cable({L"{a}", L"CABLE Input (VB-Audio Virtual Cable)", L"", L"vb-audio virtual cable"}));
+  EXPECT_FALSE(platf::mic_win::is_known_virtual_cable({L"{a}", L"Headset (Logitech G733)", L"", L"Logitech G733"}));
+}
