@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <format>
+#include <memory>
 #include <vector>
 
 // platform includes
@@ -19,6 +21,7 @@
 
 // local includes
 #include "mic_sink_win.h"
+#include "PolicyConfig.h"
 #include "src/logging.h"
 #include "src/platform/mic_sink.h"
 #include "src/utility.h"
@@ -48,9 +51,11 @@ namespace {
   const GUID subtype_ieee_float = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
   constexpr int sample_rate = 48000;
-  constexpr REFERENCE_TIME buffer_100ns = 100 * 10000;  // 100 ms
-  constexpr UINT32 prebuffer_frames = sample_rate * 40 / 1000;
-  constexpr UINT32 drop_high_frames = sample_rate * 60 / 1000;
+  // Room for the largest adaptive target (120 ms) + drop margin (40 ms) + one packet.
+  constexpr REFERENCE_TIME buffer_100ns = 300 * 10000;  // 300 ms
+
+  // PKEY_AudioEngine_DeviceFormat (defined locally, like the keys above).
+  const PROPERTYKEY key_device_format = {{0xf19f064d, 0x082c, 0x4e27, {0xbc, 0x73, 0x68, 0x82, 0xa1, 0xbb, 0x8e, 0x4c}}, 0};
 
   /// Initialises COM for the calling thread for the lifetime of the object.
   class com_scope {
@@ -74,6 +79,7 @@ namespace {
   };
 
   using platf::mic_win::endpoint_info;
+  using platf::mic_win::latency_controller;
 
   std::wstring lower(std::wstring s) {
     std::ranges::transform(s, s.begin(), [](wchar_t c) {
@@ -106,9 +112,9 @@ namespace {
   }
 
   /// Active render endpoints, with their devices (devices[i] corresponds to infos[i]). Requires COM.
-  bool enumerate(IMMDeviceEnumerator *en, std::vector<endpoint_info> &infos, std::vector<com_ptr<IMMDevice>> *devices) {
+  bool enumerate(IMMDeviceEnumerator *en, std::vector<endpoint_info> &infos, std::vector<com_ptr<IMMDevice>> *devices, EDataFlow flow = eRender) {
     IMMDeviceCollection *raw = nullptr;
-    if (FAILED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &raw)) || !raw) {
+    if (FAILED(en->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &raw)) || !raw) {
       return false;
     }
     com_ptr<IMMDeviceCollection> coll(raw);
@@ -139,6 +145,73 @@ namespace {
       }
     }
     return true;
+  }
+
+  /// Copy of the endpoint's PKEY_AudioEngine_DeviceFormat (WAVEFORMATEX with its extension bytes), empty on failure.
+  std::vector<BYTE> device_format(IMMDevice *dev) {
+    std::vector<BYTE> out;
+    IPropertyStore *ps = nullptr;
+    if (!dev || FAILED(dev->OpenPropertyStore(STGM_READ, &ps)) || !ps) {
+      return out;
+    }
+    com_ptr<IPropertyStore> store(ps);
+    PROPVARIANT v;
+    PropVariantInit(&v);
+    if (SUCCEEDED(store->GetValue(key_device_format, &v)) && v.vt == VT_BLOB && v.blob.pBlobData && v.blob.cbSize >= sizeof(WAVEFORMATEX)) {
+      const auto *wf = reinterpret_cast<const WAVEFORMATEX *>(v.blob.pBlobData);
+      const ULONG need = sizeof(WAVEFORMATEX) + wf->cbSize;
+      if (v.blob.cbSize >= need) {
+        out.assign(v.blob.pBlobData, v.blob.pBlobData + v.blob.cbSize);
+      }
+    }
+    PropVariantClear(&v);
+    return out;
+  }
+
+  /**
+   * The "Steam Streaming Microphone" driver copies raw bytes from its render endpoint to its capture endpoint without
+   * conversion, so a render format different from the capture format changes pitch (and clicks). Align the render
+   * endpoint's device format with the paired capture endpoint's before the stream is initialised.
+   */
+  void align_with_paired_capture(IMMDeviceEnumerator *en, const endpoint_info &render, IMMDevice *render_dev) {
+    std::vector<endpoint_info> caps;
+    std::vector<com_ptr<IMMDevice>> cap_devs;
+    if (!enumerate(en, caps, &cap_devs, eCapture)) {
+      return;
+    }
+    const int ci = platf::mic_win::find_paired_capture(caps, render);
+    if (ci < 0) {
+      return;
+    }
+    auto cap_fmt = device_format(cap_devs[ci].get());
+    auto render_fmt = device_format(render_dev);
+    if (cap_fmt.empty()) {
+      return;
+    }
+    const auto &cf = *reinterpret_cast<const WAVEFORMATEX *>(cap_fmt.data());
+    if (!render_fmt.empty() && !platf::mic_win::formats_differ(cf, *reinterpret_cast<const WAVEFORMATEX *>(render_fmt.data()))) {
+      return;
+    }
+    IPolicyConfig *raw = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_CPolicyConfigClient, nullptr, CLSCTX_ALL, IID_IPolicyConfig, reinterpret_cast<void **>(&raw));
+    if (FAILED(hr) || !raw) {
+      BOOST_LOG(warning) << "mic sink: cannot align '"sv << utf_utils::to_utf8(render.friendly) << "' with '"sv << utf_utils::to_utf8(caps[ci].friendly)
+                         << "' (policy config unavailable [0x"sv << util::hex(hr).to_string_view() << "]); microphone pitch will be wrong"sv;
+      return;
+    }
+    com_ptr<IPolicyConfig> policy(raw);
+    // Undocumented API: pass copies, never the property-store buffers.
+    std::wstring id_copy = render.id;
+    std::vector<BYTE> endpoint_fmt = cap_fmt;
+    std::vector<BYTE> mix_fmt = cap_fmt;
+    hr = policy->SetDeviceFormat(id_copy.c_str(), reinterpret_cast<WAVEFORMATEX *>(endpoint_fmt.data()), reinterpret_cast<WAVEFORMATEX *>(mix_fmt.data()));
+    if (FAILED(hr)) {
+      BOOST_LOG(warning) << "mic sink: cannot align '"sv << utf_utils::to_utf8(render.friendly) << "' with '"sv << utf_utils::to_utf8(caps[ci].friendly)
+                         << "' [0x"sv << util::hex(hr).to_string_view() << "]; microphone pitch will be wrong"sv;
+      return;
+    }
+    BOOST_LOG(info) << "mic sink: aligned '"sv << utf_utils::to_utf8(render.friendly) << "' format to '"sv << utf_utils::to_utf8(caps[ci].friendly) << "' ("sv
+                    << platf::mic_win::format_to_string(cf) << ')';
   }
 
   int select(const std::vector<endpoint_info> &infos, const std::string &name) {
@@ -185,6 +258,7 @@ namespace {
       }
 
       warn_if_default_render(en.get(), infos[idx]);
+      align_with_paired_capture(en.get(), infos[idx], devices[idx].get());
 
       IAudioClient *ac = nullptr;
       if (FAILED(devices[idx]->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&ac))) || !ac) {
@@ -226,9 +300,9 @@ namespace {
       render_.reset(rc);
 
       started_ = false;
-      dropping_ = false;
+      latency_.restart(latency_controller::clock::now());
       // Prebuffer silence so the first real frames do not underrun, then start.
-      if (!push_silence(prebuffer_frames)) {
+      if (!push_silence(latency_.target_frames())) {
         return false;
       }
       if (FAILED(client_->Start())) {
@@ -253,22 +327,28 @@ namespace {
         handle_failure(hr);
         return false;
       }
-      // Latency bound (target 40 ms): above 60 ms drop incoming frames until the backlog drains below 40 ms.
-      if (padding > drop_high_frames) {
-        dropping_ = true;
-      } else if (padding < prebuffer_frames) {
-        dropping_ = false;
+      // Adaptive latency: drop above target + 40 ms, re-prebuffer `target` after an underrun (padding == 0).
+      const auto old_target_ms = latency_.target_ms();
+      const auto act = latency_.on_write(padding, latency_controller::clock::now());
+      if (latency_.target_ms() != old_target_ms) {
+        const auto now = latency_controller::clock::now();
+        if (now - last_target_log_ >= 2s) {
+          last_target_log_ = now;
+          BOOST_LOG(info) << "mic sink: latency target "sv << old_target_ms << " -> "sv << latency_.target_ms() << " ms"sv;
+        }
       }
-      if (dropping_) {
+      if (act.what == latency_controller::kind::drop) {
         return true;
       }
-      // Underrun after Start(): re-prebuffer 40 ms of silence so playback does not stutter on every frame.
-      if (padding == 0 && prebuffer_frames + frames <= buffer_frames_ && !push_silence(prebuffer_frames)) {
-        handle_failure(E_FAIL);
-        return false;
-      }
-      if (padding == 0) {
-        padding = prebuffer_frames;
+      if (act.what == latency_controller::kind::prebuffer_then_write) {
+        const UINT32 pre = act.frames;
+        if (pre + frames <= buffer_frames_) {
+          if (!push_silence(pre)) {
+            handle_failure(E_FAIL);
+            return false;
+          }
+          padding = pre;
+        }
       }
       if (padding + frames > buffer_frames_) {
         return true;
@@ -355,12 +435,13 @@ namespace {
     bool started_ = false;
     bool opened_ = false;
     bool warned_default_ = false;
-    bool dropping_ = false;
+    latency_controller latency_ {sample_rate};
+    latency_controller::clock::time_point last_target_log_ {};
   };
 }  // namespace
 
 namespace platf::mic_win {
-    int select_endpoint(const std::vector<endpoint_info> &infos, const std::string &name) {
+  int select_endpoint(const std::vector<endpoint_info> &infos, const std::string &name) {
     if (!name.empty()) {
       const auto needle = lower(utf_utils::from_utf8(name));
       for (size_t i = 0; i < infos.size(); ++i) {
@@ -381,6 +462,75 @@ namespace platf::mic_win {
       }
     }
     return -1;
+  }
+
+  int find_paired_capture(const std::vector<endpoint_info> &captures, const endpoint_info &render) {
+    if (render.adapter.empty()) {
+      return -1;
+    }
+    const auto needle = lower(render.adapter);
+    for (size_t i = 0; i < captures.size(); ++i) {
+      if (lower(captures[i].adapter) == needle) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  }
+
+  namespace {
+    /// Sample type: the EXTENSIBLE sub-format's leading word, otherwise the format tag.
+    WORD effective_tag(const WAVEFORMATEX &f) {
+      if (f.wFormatTag == WAVE_FORMAT_EXTENSIBLE && f.cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        return static_cast<WORD>(reinterpret_cast<const WAVEFORMATEXTENSIBLE &>(f).SubFormat.Data1);
+      }
+      return f.wFormatTag;
+    }
+  }  // namespace
+
+  bool formats_differ(const WAVEFORMATEX &a, const WAVEFORMATEX &b) {
+    return a.nChannels != b.nChannels || a.nSamplesPerSec != b.nSamplesPerSec || a.wBitsPerSample != b.wBitsPerSample || effective_tag(a) != effective_tag(b);
+  }
+
+  std::string format_to_string(const WAVEFORMATEX &f) {
+    const auto tag = effective_tag(f);
+    return std::format("{}ch {} Hz {}-bit {}", f.nChannels, f.nSamplesPerSec, f.wBitsPerSample, tag == WAVE_FORMAT_IEEE_FLOAT ? "float" : tag == WAVE_FORMAT_PCM ? "PCM" : "other");
+  }
+
+  latency_controller::latency_controller(std::uint32_t sample_rate):
+      rate_(sample_rate),
+      target_(static_cast<std::uint32_t>(static_cast<std::uint64_t>(sample_rate) * min_ms / 1000)) {}
+
+  void latency_controller::restart(clock::time_point now) {
+    dropping_ = false;
+    last_event_ = now;
+    has_event_ = true;
+  }
+
+  latency_controller::action latency_controller::on_write(std::uint32_t padding, clock::time_point now) {
+    if (padding == 0) {
+      // Underrun: be more conservative from now on and rebuild the buffer.
+      target_ = std::min(target_ + frames_of(raise_step_ms), frames_of(max_ms));
+      last_event_ = now;
+      has_event_ = true;
+      dropping_ = false;
+      return {kind::prebuffer_then_write, target_};
+    }
+    if (!has_event_) {
+      has_event_ = true;
+      last_event_ = now;
+    }
+    if (now - last_event_ >= calm_period) {
+      const auto floor = frames_of(min_ms);
+      const auto step = frames_of(lower_step_ms);
+      target_ = target_ > floor + step ? target_ - step : floor;
+      last_event_ = now;
+    }
+    if (padding > drop_frames()) {
+      dropping_ = true;
+    } else if (padding < target_) {
+      dropping_ = false;
+    }
+    return {dropping_ ? kind::drop : kind::write, 0};
   }
 
   bool is_mic_endpoint(const std::vector<endpoint_info> &infos, const std::string &name, const std::wstring &id) {
