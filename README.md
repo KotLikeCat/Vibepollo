@@ -1,3 +1,8 @@
+**Fork note (KotLikeCat):** adds two-way clipboard sync (text, HTML, RTF, images) and microphone passthrough from Moonlight on macOS. Designs:
+[clipboard sync](https://github.com/KotLikeCat/Vibepollo/blob/feat/microphone/docs/superpowers/specs/2026-10-01-clipboard-sync-design.md),
+[microphone](https://github.com/KotLikeCat/Vibepollo/blob/feat/microphone/docs/superpowers/specs/2026-10-01-microphone-design.md).
+The microphone needs a virtual audio device on the host ("Steam Streaming Microphone" or VB-CABLE); see `mic_sink` in docs/configuration.md.
+
 # Vibepollo
 
 ## What is Vibepollo?
