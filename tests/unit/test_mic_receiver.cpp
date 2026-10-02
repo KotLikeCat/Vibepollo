@@ -24,6 +24,7 @@ namespace {
     int opened = 0;
     int closed = 0;
     std::vector<std::size_t> writes;  // frames per write call
+    int fail_after_writes = -1;  // write() returns false once after this many successful writes (-1 = never)
   };
 
   class fake_sink: public platf::mic_sink {
@@ -38,10 +39,15 @@ namespace {
       return true;
     }
 
-    void write(const float *samples, std::size_t frames) override {
+    bool write(const float *samples, std::size_t frames) override {
       EXPECT_NE(samples, nullptr);
       std::lock_guard lock {state_->mutex};
+      if (state_->fail_after_writes >= 0 && static_cast<int>(state_->writes.size()) >= state_->fail_after_writes) {
+        state_->fail_after_writes = -1;
+        return false;
+      }
       state_->writes.push_back(frames);
+      return true;
     }
 
     void close() override {
@@ -221,4 +227,28 @@ TEST_F(MicReceiverTest, ShutdownClosesSink) {
   mic::receiver::shutdown();
   std::lock_guard lock {state->mutex};
   EXPECT_EQ(state->closed, 1);
+}
+
+TEST_F(MicReceiverTest, FailedWriteClosesAndReopensSink) {
+  mic::receiver::set_sink_retry_for_testing(50ms);
+  {
+    std::lock_guard lock {state->mutex};
+    state->fail_after_writes = 1;
+  }
+  send(1, 0);
+  EXPECT_EQ(settle(), 1u);
+  send(1, 1);  // write fails -> sink closed
+  settle();
+  {
+    std::lock_guard lock {state->mutex};
+    EXPECT_EQ(state->opened, 1);
+    EXPECT_EQ(state->closed, 1);
+  }
+  std::this_thread::sleep_for(100ms);
+  send(1, 2);
+  send(1, 3);
+  settle();
+  std::lock_guard lock {state->mutex};
+  EXPECT_EQ(state->opened, 2);
+  EXPECT_GE(state->writes.size(), 2u);
 }

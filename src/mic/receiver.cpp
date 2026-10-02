@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,8 +24,8 @@ namespace mic::receiver {
     using clock = std::chrono::steady_clock;
 
     constexpr auto owner_silence_timeout = 1s;
-        constexpr auto sink_retry_interval = 5s;
     constexpr auto sink_warning_interval = 60s;
+    std::atomic<std::chrono::milliseconds::rep> g_sink_retry_ms {5000};
     constexpr std::size_t max_queue = 50;  ///< 1 s of audio; beyond that the worker is stuck, drop
 
     struct packet_t {
@@ -67,6 +68,8 @@ namespace mic::receiver {
       bool warned = false;
       bool tried_open = false;
       bool decoder_error_logged = false;
+      bool write_failed_logged = false;
+      clock::time_point last_write_failure;
       clock::time_point last_decoder_error;
     };
 
@@ -82,7 +85,7 @@ namespace mic::receiver {
         return true;
       }
       const auto now = clock::now();
-      if (st.tried_open && now - st.last_open_attempt < sink_retry_interval) {
+      if (st.tried_open && now - st.last_open_attempt < std::chrono::milliseconds(g_sink_retry_ms.load())) {
         return false;
       }
       st.tried_open = true;
@@ -103,8 +106,18 @@ namespace mic::receiver {
     }
 
     void render(worker_state_t &st, const float *samples) {
-      if (st.sink_open) {
-        st.sink->write(samples, frame_samples);
+      if (st.sink_open && !st.sink->write(samples, frame_samples)) {
+        const auto now = clock::now();
+        if (!st.write_failed_logged || now - st.last_write_failure >= sink_warning_interval) {
+          st.write_failed_logged = true;
+          st.last_write_failure = now;
+          BOOST_LOG(warning) << "Microphone sink failed; closing it and retrying later"sv;
+        }
+        st.sink->close();
+        st.sink.reset();
+        st.sink_open = false;
+        st.tried_open = true;
+        st.last_open_attempt = now;  // reopen after the retry interval
       }
     }
 
@@ -275,7 +288,12 @@ namespace mic::receiver {
     g_busy = false;
     g_has_owner = false;
     g_idle_timeout = 3s;
+    g_sink_retry_ms = 5000;
     ++g_owner_generation;
+  }
+
+  void set_sink_retry_for_testing(std::chrono::milliseconds interval) {
+    g_sink_retry_ms = interval.count();
   }
 
   void set_idle_timeout_for_testing(std::chrono::milliseconds timeout) {

@@ -1051,7 +1051,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Name of the audio render device that feeds microphone audio to the host (matches any device name field,
             case-insensitive). If empty, "Steam Streaming Microphone" and then "CABLE Input" (VB-Audio) are tried.
-            A real speaker is never used.
+            A real speaker is never used when empty, but a non-empty value is matched as a substring: use a specific
+            name (a short substring such as "Speakers" may match a real speaker).
             @tip{See [mic_passthrough](#mic_passthrough)!}
         </td>
     </tr>

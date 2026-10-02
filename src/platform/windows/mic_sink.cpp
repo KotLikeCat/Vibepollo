@@ -50,7 +50,6 @@ namespace {
   constexpr int sample_rate = 48000;
   constexpr REFERENCE_TIME buffer_100ns = 100 * 10000;  // 100 ms
   constexpr UINT32 prebuffer_frames = sample_rate * 40 / 1000;
-  constexpr UINT32 max_padding_frames = sample_rate * 120 / 1000;
 
   /// Initialises COM for the calling thread for the lifetime of the object.
   class com_scope {
@@ -73,12 +72,7 @@ namespace {
     bool ok_ = false;
   };
 
-  struct endpoint_info {
-    std::wstring id;
-    std::wstring friendly;
-    std::wstring desc;
-    std::wstring adapter;
-  };
+  using platf::mic_win::endpoint_info;
 
   std::wstring lower(std::wstring s) {
     std::ranges::transform(s, s.begin(), [](wchar_t c) {
@@ -146,30 +140,11 @@ namespace {
     return true;
   }
 
-  /// Index of the endpoint selected by the rule, or -1.
   int select(const std::vector<endpoint_info> &infos, const std::string &name) {
-    if (!name.empty()) {
-      const auto needle = lower(utf_utils::from_utf8(name));
-      for (size_t i = 0; i < infos.size(); ++i) {
-        const auto &e = infos[i];
-        if (contains_ci(e.id, needle) || contains_ci(e.friendly, needle) || contains_ci(e.desc, needle) || contains_ci(e.adapter, needle)) {
-          return static_cast<int>(i);
-        }
-      }
-      return -1;
-    }
-    for (const auto *virt : {L"steam streaming microphone", L"cable input"}) {
-      const std::wstring needle = virt;
-      for (size_t i = 0; i < infos.size(); ++i) {
-        const auto &e = infos[i];
-        if (contains_ci(e.friendly, needle) || contains_ci(e.desc, needle) || contains_ci(e.adapter, needle)) {
-          return static_cast<int>(i);
-        }
-      }
-    }
-    return -1;
+    return platf::mic_win::select_endpoint(infos, name);
   }
 
+  /// Thread affinity: create, open, close and destroy on the same thread (COM is initialised per open).
   class wasapi_mic_sink final: public platf::mic_sink {
   public:
     explicit wasapi_mic_sink(std::string name):
@@ -248,7 +223,6 @@ namespace {
       render_.reset(rc);
 
       started_ = false;
-      prebuffered_ = 0;
       // Prebuffer silence so the first real frames do not underrun, then start.
       if (!push_silence(prebuffer_frames)) {
         return false;
@@ -262,30 +236,36 @@ namespace {
       return true;
     }
 
-    void write(const float *mono48k, std::size_t frames) override {
-      if (!opened_ || !client_ || !render_ || frames == 0) {
-        return;
+    bool write(const float *mono48k, std::size_t frames) override {
+      if (!opened_ || !client_ || !render_) {
+        return false;
+      }
+      if (frames == 0) {
+        return true;
       }
       UINT32 padding = 0;
       HRESULT hr = client_->GetCurrentPadding(&padding);
       if (FAILED(hr)) {
         handle_failure(hr);
-        return;
+        return false;
       }
-      if (padding > max_padding_frames || padding + frames > buffer_frames_) {
-        return;  // too much queued: drop this frame to bound latency
+      // Latency bound: the 100 ms endpoint buffer caps queued audio, so drop the frame rather than overflow.
+      if (padding + frames > buffer_frames_) {
+        return true;
       }
       BYTE *data = nullptr;
       hr = render_->GetBuffer(static_cast<UINT32>(frames), &data);
       if (FAILED(hr) || !data) {
         handle_failure(hr);
-        return;
+        return false;
       }
       std::copy_n(mono48k, frames, reinterpret_cast<float *>(data));
       hr = render_->ReleaseBuffer(static_cast<UINT32>(frames), 0);
       if (FAILED(hr)) {
         handle_failure(hr);
+        return false;
       }
+      return true;
     }
 
     void close() override {
@@ -327,13 +307,35 @@ namespace {
     com_ptr<IAudioClient> client_;
     com_ptr<IAudioRenderClient> render_;
     UINT32 buffer_frames_ = 0;
-    UINT32 prebuffered_ = 0;
     bool started_ = false;
     bool opened_ = false;
   };
 }  // namespace
 
 namespace platf::mic_win {
+    int select_endpoint(const std::vector<endpoint_info> &infos, const std::string &name) {
+    if (!name.empty()) {
+      const auto needle = lower(utf_utils::from_utf8(name));
+      for (size_t i = 0; i < infos.size(); ++i) {
+        const auto &e = infos[i];
+        if (contains_ci(e.id, needle) || contains_ci(e.friendly, needle) || contains_ci(e.desc, needle) || contains_ci(e.adapter, needle)) {
+          return static_cast<int>(i);
+        }
+      }
+      return -1;
+    }
+    for (const auto *virt : {L"steam streaming microphone", L"cable input"}) {
+      const std::wstring needle = virt;
+      for (size_t i = 0; i < infos.size(); ++i) {
+        const auto &e = infos[i];
+        if (contains_ci(e.friendly, needle) || contains_ci(e.desc, needle) || contains_ci(e.adapter, needle)) {
+          return static_cast<int>(i);
+        }
+      }
+    }
+    return -1;
+  }
+
   std::optional<std::string> resolve_endpoint_name(const std::string &name_or_empty, bool *audio_present) {
     if (audio_present) {
       *audio_present = false;

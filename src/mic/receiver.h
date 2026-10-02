@@ -37,6 +37,9 @@ namespace mic::receiver {
   /// Test-only: shortens the 3 s idle period after which the sink and decoder are closed.
   void set_idle_timeout_for_testing(std::chrono::milliseconds timeout);
 
+  /// Test-only: shortens the 5 s delay before a failed or closed sink is reopened.
+  void set_sink_retry_for_testing(std::chrono::milliseconds interval);
+
   /// Test hook: waits until the queue is drained and the worker is idle.
   bool wait_idle_for_testing(std::chrono::milliseconds timeout);
 }  // namespace mic::receiver

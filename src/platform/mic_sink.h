@@ -16,7 +16,9 @@ namespace platf {
     /// Opens the endpoint. Returns false when no suitable device exists or it cannot be started.
     virtual bool open() = 0;
     /// Queues `frames` mono samples at 48 kHz. May drop samples to bound latency.
-    virtual void write(const float *mono48k, std::size_t frames) = 0;
+    /// Returns false when the sink is no longer usable (e.g. device removed); the caller should close and reopen it.
+    /// A sink must be created, opened, closed and destroyed on the same thread (COM is initialised per open).
+    virtual bool write(const float *mono48k, std::size_t frames) = 0;
     virtual void close() = 0;
   };
 

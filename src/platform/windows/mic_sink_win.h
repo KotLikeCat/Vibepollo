@@ -6,8 +6,20 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace platf::mic_win {
+  /// Names of an active render endpoint (UTF-16).
+  struct endpoint_info {
+    std::wstring id;
+    std::wstring friendly;
+    std::wstring desc;
+    std::wstring adapter;
+  };
+
+  /// Pure selection rule over a list of endpoints; returns the index or -1. Never matches a real speaker in auto mode.
+  int select_endpoint(const std::vector<endpoint_info> &infos, const std::string &name);
+
   /**
    * @brief Resolve the render endpoint that the sink would use.
    * @param name_or_empty Non-empty: case-insensitive "contains" match on id/friendly name/description/adapter name.

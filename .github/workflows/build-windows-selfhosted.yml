@@ -156,7 +156,7 @@ jobs:
             test_component_clipboard_bundle test_component_clipboard_formats \
             test_component_clipboard_sync_policy test_component_clipboard_win \
             sunshine_clipboard_helper test_component_clipboard_helper \
-            test_component_resource_config_catalog test_component_mic_receiver test_component_mic_sink
+            test_component_resource_config_catalog test_component_mic_receiver test_component_mic_sink test_component_mic_sink_select
           ctest --test-dir build-tests -R "clipboard|resource_config_catalog|mic_receiver|mic_sink" --output-on-failure
 
       - name: Strip binaries
