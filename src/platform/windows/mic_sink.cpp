@@ -182,29 +182,34 @@ namespace {
     bool open() override {
       close();
       com_.reset(new com_scope());
+      // Locals (enumerator, devices) are released when open_impl returns, i.e. before any CoUninitialize in close().
+      if (!open_impl()) {
+        close();
+        return false;
+      }
+      return true;
+    }
+
+    bool open_impl() {
 
       auto en = make_enumerator();
       if (!en) {
         BOOST_LOG(warning) << "mic sink: cannot create device enumerator"sv;
-        close();
         return false;
       }
       std::vector<endpoint_info> infos;
       std::vector<com_ptr<IMMDevice>> devices;
       if (!enumerate(en.get(), infos, &devices)) {
-        close();
         return false;
       }
       const int idx = select(infos, name_);
       if (idx < 0) {
         BOOST_LOG(warning) << "mic sink: no matching virtual microphone endpoint"sv;
-        close();
         return false;
       }
 
       IAudioClient *ac = nullptr;
       if (FAILED(devices[idx]->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&ac))) || !ac) {
-        close();
         return false;
       }
       client_.reset(ac);
@@ -231,16 +236,13 @@ namespace {
       );
       if (FAILED(hr)) {
         BOOST_LOG(warning) << "mic sink: IAudioClient::Initialize failed [0x"sv << util::hex(hr).to_string_view() << ']';
-        close();
         return false;
       }
       if (FAILED(client_->GetBufferSize(&buffer_frames_))) {
-        close();
         return false;
       }
       IAudioRenderClient *rc = nullptr;
       if (FAILED(client_->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void **>(&rc))) || !rc) {
-        close();
         return false;
       }
       render_.reset(rc);
@@ -249,11 +251,9 @@ namespace {
       prebuffered_ = 0;
       // Prebuffer silence so the first real frames do not underrun, then start.
       if (!push_silence(prebuffer_frames)) {
-        close();
         return false;
       }
       if (FAILED(client_->Start())) {
-        close();
         return false;
       }
       started_ = true;
