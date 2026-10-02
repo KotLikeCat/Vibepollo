@@ -4,6 +4,7 @@
  * @note No logging here on purpose: the file is also compiled into an isolated test.
  */
 #include "src/platform/clipboard_sync.h"
+#include "src/platform/windows/clipboard_win.h"
 
 #include "src/clipboard/formats.h"
 #include "src/platform/windows/utf_utils.h"
@@ -345,15 +346,7 @@ namespace {
   }
 }  // namespace
 
-namespace platf::clipboard_sync {
-  bool supported() {
-    return true;
-  }
-
-  std::uint32_t sequence() {
-    return GetClipboardSequenceNumber();
-  }
-
+namespace platf::clipboard_sync::local {
   std::uint32_t available_formats() {
     std::uint32_t mask = 0;
     if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
@@ -403,6 +396,16 @@ namespace platf::clipboard_sync {
       }
     }
     return items;
+  }
+}  // namespace platf::clipboard_sync::local
+
+namespace platf::clipboard_sync {
+  bool supported() {
+    return true;
+  }
+
+  std::uint32_t sequence() {
+    return GetClipboardSequenceNumber();
   }
 
   std::optional<std::uint32_t> write(const std::vector<item> &items) {

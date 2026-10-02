@@ -113,6 +113,23 @@ target_link_libraries(sunshine_wgc_capture
         ${PLATFORM_LIBRARIES})
 target_compile_options(sunshine_wgc_capture PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
+# Clipboard helper: reads the clipboard with the interactive user's token (SYSTEM cannot see HTML/RTF/PNG)
+add_executable(sunshine_clipboard_helper
+        sunshine_clipboard_helper.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/bundle.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/formats.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_win.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.cpp)
+set_target_properties(sunshine_clipboard_helper PROPERTIES CXX_STANDARD 23)
+target_link_libraries(sunshine_clipboard_helper
+        windowscodecs
+        ole32
+        oleaut32
+        shlwapi
+        user32
+        ${PLATFORM_LIBRARIES})
+target_compile_options(sunshine_clipboard_helper PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+
 # Display settings helper: detached helper that applies/reverts display settings via IPC.
 # One exe hosts both engines (legacy + v2), selected by --engine= or persisted state.
 add_executable(sunshine_display_helper

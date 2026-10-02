@@ -886,6 +886,15 @@ if(WIN32)
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/utf_utils.cpp"
         LINK_LIBRARIES windowscodecs ole32 oleaut32 shlwapi)
     set_tests_properties(test_component_clipboard_win PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
+    sunshine_register_component(NAME test_component_clipboard_helper TEST_SOURCE unit/platform/windows/test_clipboard_helper.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/clipboard_win.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/formats.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/bundle.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/utf_utils.cpp"
+        LINK_LIBRARIES windowscodecs ole32 oleaut32 shlwapi
+        DEFINITIONS "SUNSHINE_CLIPBOARD_HELPER_PATH=\"$<TARGET_FILE:sunshine_clipboard_helper>\"")
+    add_dependencies(test_component_clipboard_helper sunshine_clipboard_helper)
+    set_tests_properties(test_component_clipboard_helper PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
     sunshine_register_component(NAME test_component_game_activity TEST_SOURCE unit/platform/windows/test_game_activity.cpp
         PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/game_activity_policy.cpp")
     sunshine_register_component(NAME test_component_native_amf_policy TEST_SOURCE unit/platform/windows/test_native_amf_review.cpp)

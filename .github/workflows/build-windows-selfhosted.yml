@@ -155,6 +155,7 @@ jobs:
           cmake --build build-tests --parallel "$CMAKE_BUILD_PARALLEL_LEVEL" --target \
             test_component_clipboard_bundle test_component_clipboard_formats \
             test_component_clipboard_sync_policy test_component_clipboard_win \
+            sunshine_clipboard_helper test_component_clipboard_helper \
             test_component_resource_config_catalog
           ctest --test-dir build-tests -R "clipboard|resource_config_catalog" --output-on-failure
 

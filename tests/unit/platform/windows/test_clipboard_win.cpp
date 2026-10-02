@@ -4,6 +4,7 @@
  */
 #include "../../../tests_common.h"
 #include "src/platform/clipboard_sync.h"
+#include "src/platform/windows/clipboard_win.h"
 
 #include <windows.h>
 
@@ -15,6 +16,7 @@
 
 namespace {
   namespace cs = platf::clipboard_sync;
+  namespace lc = platf::clipboard_sync::local;
   using clipboard::item;
   using clipboard::item_type;
   using namespace std::chrono_literals;
@@ -54,8 +56,8 @@ TEST(ClipboardWin, RoundTripsAllFormats) {
   }
   EXPECT_TRUE(cs::supported());
   EXPECT_EQ(cs::sequence(), *seq);
-  EXPECT_EQ(cs::available_formats(), clipboard::format_all);
-  const auto back = cs::read(clipboard::format_all);
+  EXPECT_EQ(lc::available_formats(), clipboard::format_all);
+  const auto back = lc::read(clipboard::format_all);
   ASSERT_TRUE(back.has_value());
   EXPECT_EQ(find(*back, item_type::text), "Привет\nмир");
   EXPECT_EQ(find(*back, item_type::html), "<b>жирный</b> 🎉");
@@ -67,7 +69,7 @@ TEST(ClipboardWin, ReadHonorsMask) {
   if (!cs::write({{item_type::text, "only"}, {item_type::png, k_png}})) {
     GTEST_SKIP() << "Clipboard is not available in this session";
   }
-  const auto back = cs::read(clipboard::format_text);
+  const auto back = lc::read(clipboard::format_text);
   ASSERT_TRUE(back.has_value());
   ASSERT_EQ(back->size(), 1u);
   EXPECT_EQ((*back)[0].type, item_type::text);
@@ -93,8 +95,8 @@ TEST(ClipboardWin, ConvertsDibOnlyImageToPng) {
   SetClipboardData(CF_DIB, handle);
   CloseClipboard();
 
-  EXPECT_EQ(cs::available_formats() & clipboard::format_png, clipboard::format_png);
-  const auto back = cs::read(clipboard::format_png);
+  EXPECT_EQ(lc::available_formats() & clipboard::format_png, clipboard::format_png);
+  const auto back = lc::read(clipboard::format_png);
   ASSERT_TRUE(back.has_value());
   ASSERT_EQ(back->size(), 1u);
   EXPECT_EQ((*back)[0].data.compare(0, 8, "\x89PNG\r\n\x1a\n", 8), 0);
@@ -120,7 +122,7 @@ TEST(ClipboardWin, RejectsImageAbovePixelCap) {
   SetClipboardData(CF_DIB, handle);
   CloseClipboard();
 
-  const auto back = cs::read(clipboard::format_png);
+  const auto back = lc::read(clipboard::format_png);
   if (back) {
     EXPECT_FALSE(find(*back, item_type::png).has_value());
   }
@@ -156,7 +158,7 @@ TEST(ClipboardWin, ReportsUnavailableWhenClipboardIsLocked) {
     GTEST_SKIP() << "Clipboard is not available in this session";
   }
   const auto start = std::chrono::steady_clock::now();
-  const auto result = cs::read(clipboard::format_all);
+  const auto result = lc::read(clipboard::format_all);
   const auto elapsed = std::chrono::steady_clock::now() - start;
   release = true;
   holder.join();
