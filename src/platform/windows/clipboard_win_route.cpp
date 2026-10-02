@@ -12,6 +12,8 @@
 
 #include <windows.h>
 
+#include <io.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -83,6 +85,10 @@ namespace {
     tmp_file out;
     if (!out.file) {
       result.error = "tmpfile failed";
+      return result;
+    }
+    if (!SetHandleInformation(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(out.file))), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+      result.error = "cannot make output handle inheritable";
       return result;
     }
     const std::string cmd = "\"" + exe.string() + "\" " + argument;

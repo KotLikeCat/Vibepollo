@@ -103,6 +103,9 @@ TEST(ClipboardHelper, FormatsPrintsMask) {
   }
   const auto run = run_helper(L"formats");
   ASSERT_TRUE(run.started);
+  if (run.exit_code == 3) {
+    GTEST_SKIP() << "Clipboard is busy in this session";
+  }
   ASSERT_EQ(run.exit_code, 0u);
   const auto mask = static_cast<std::uint32_t>(std::stoul(run.out));
   const std::uint32_t wanted = clipboard::format_text | clipboard::format_html | clipboard::format_rtf;

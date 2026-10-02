@@ -9,6 +9,8 @@
 #include "src/clipboard/bundle.h"
 #include "src/platform/windows/clipboard_win.h"
 
+#include <boost/log/core.hpp>
+
 #include <windows.h>
 
 #include <fcntl.h>
@@ -20,6 +22,7 @@
 #include <string>
 
 int main(int argc, char **argv) {
+  boost::log::core::get()->set_logging_enabled(false);
   if (argc < 2) {
     return 2;
   }
