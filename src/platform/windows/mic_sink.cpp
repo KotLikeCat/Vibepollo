@@ -21,6 +21,7 @@
 #include "mic_sink_win.h"
 #include "src/logging.h"
 #include "src/platform/mic_sink.h"
+#include "src/utility.h"
 #include "utf_utils.h"
 
 using namespace std::literals;
