@@ -4,6 +4,16 @@
  *
  * No internal threads; time only advances through tick(). Callbacks are invoked without the internal
  * mutex held and, across threads, in the order the events were produced.
+ *
+ * Contract:
+ * - The owner must call tick() continuously (the service ticks every 200 ms); timeouts only advance through it.
+ *   Requests issued after a tick are timed from that tick.
+ * - Callbacks may run on whichever thread is currently draining the event queue, so consumers must not block
+ *   inside them. They may re-enter the scheduler.
+ * - After cancel_read / clear_offer / set_offer, deliver / fail events already queued for the affected reads may
+ *   still be invoked.
+ * - Slots (max_outstanding) cover in-flight plus buffered-out-of-order chunks and are released when a chunk is
+ *   handed to deliver, so at most max_outstanding chunks are ever buffered.
  */
 #pragma once
 

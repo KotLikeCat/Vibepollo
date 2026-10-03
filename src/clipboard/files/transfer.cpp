@@ -78,12 +78,12 @@ namespace clipboard::files {
     }
     for (auto r = requests_.begin(); r != requests_.end();) {
       if (r->second.read_id == read_id) {
-        --outstanding_;
         r = requests_.erase(r);
       } else {
         ++r;
       }
     }
+    outstanding_ -= it->second.outstanding;  // in-flight + buffered slots
     round_robin_.erase(std::remove(round_robin_.begin(), round_robin_.end(), read_id), round_robin_.end());
     reads_.erase(it);
   }
@@ -177,16 +177,15 @@ namespace clipboard::files {
       return false;
     }
     auto &rs = it->second;
-    const auto size = offer_->entries[file_index].size;
-    if (data.size() != req.length && !(data.size() < req.length && req.offset + data.size() == size && data.size() > 0)) {
+    // Requests never extend past the file size, so any length mismatch (short or long) is an io error.
+    if (data.size() != req.length) {
       fail_read_locked(req.read_id, read_error::io);
       pump_locked();
       drain(lock);
       return true;
     }
+    // The slot stays held (in-flight -> buffered) until the chunk is handed to deliver.
     requests_.erase(rit);
-    --outstanding_;
-    --rs.outstanding;
     rs.buffered.emplace(req.offset, std::move(data));
     while (true) {
       auto b = rs.buffered.find(rs.next_deliver);
@@ -196,6 +195,8 @@ namespace clipboard::files {
       std::string piece = std::move(b->second);
       rs.buffered.erase(b);
       rs.next_deliver += piece.size();
+      --rs.outstanding;
+      --outstanding_;
       const bool last = rs.next_deliver >= rs.end;
       const auto read_id = req.read_id;
       events_.push_back([this, read_id, piece = std::move(piece), last]() mutable {

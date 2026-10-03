@@ -237,7 +237,7 @@ TEST(ClipboardFilesTransfer, CancelReadStopsRequests) {
   EXPECT_EQ(h.requests.size(), 5u);  // budget freed
 }
 
-TEST(ClipboardFilesTransfer, ShortChunkOnlyAtEof) {
+TEST(ClipboardFilesTransfer, ShortOrLongChunkIsIoError) {
   harness h;
   h.offer({8 * MiB});
   ASSERT_TRUE(h.t.start_read(1, 0, 0, 8 * MiB));
@@ -281,4 +281,93 @@ TEST(ClipboardFilesTransfer, MismatchedChunkMetadataRejected) {
   offer_id_t other = r.offer_id;
   other[0] ^= 0xff;
   EXPECT_FALSE(h.t.on_chunk(other, r.request_id, 0, r.offset, std::string(r.length, 'x')));
+}
+
+TEST(ClipboardFilesTransfer, ReorderBufferIsBounded) {
+  harness h;
+  h.offer({40 * MiB});
+  ASSERT_TRUE(h.t.start_read(1, 0, 0, 40 * MiB));
+  ASSERT_EQ(h.requests.size(), 4u);
+  for (std::size_t i = 1; i < 4; ++i) {
+    ASSERT_TRUE(h.answer(h.requests[i], 4 * MiB));
+  }
+  EXPECT_EQ(h.requests.size(), 4u);  // head missing: no slot released
+  EXPECT_TRUE(h.out.empty());
+  ASSERT_TRUE(h.answer(h.requests[0], 4 * MiB));
+  ASSERT_EQ(h.out.size(), 4u);
+  EXPECT_EQ(h.requests.size(), 8u);
+}
+
+TEST(ClipboardFilesTransfer, BudgetFreedAfterTimeoutFailure) {
+  harness h;
+  h.offer({8 * MiB, 1024});
+  ASSERT_TRUE(h.t.start_read(1, 0, 0, 8 * MiB));
+  ASSERT_TRUE(h.t.start_read(2, 1, 0, 1024));
+  h.t.tick(h.now + 15s);
+  h.t.tick(h.now + 30s);
+  EXPECT_EQ(h.fails.size(), 2u);
+  const auto before = h.requests.size();
+  ASSERT_TRUE(h.t.start_read(3, 1, 0, 1024));
+  EXPECT_EQ(h.requests.size(), before + 1);
+}
+
+TEST(ClipboardFilesTransfer, BudgetFreedAfterSetOfferAndCancel) {
+  harness h;
+  h.offer({40 * MiB});
+  ASSERT_TRUE(h.t.start_read(1, 0, 0, 40 * MiB));
+  manifest m;
+  m.offer_id = harness::make_id();
+  m.offer_id[0] = 0x42;
+  m.entries.push_back({entry_kind::file, 1024, 0, "n"});
+  h.t.set_offer(m);
+  auto n = h.requests.size();
+  ASSERT_TRUE(h.t.start_read(2, 0, 0, 1024));
+  EXPECT_EQ(h.requests.size(), n + 1);
+  h.t.cancel_read(2);
+  ASSERT_TRUE(h.t.start_read(3, 0, 0, 1024));
+  EXPECT_EQ(h.requests.size(), n + 2);
+}
+
+TEST(ClipboardFilesTransfer, DeliverCallbackMayReenter) {
+  std::vector<chunk_request> requests;
+  std::vector<std::uint32_t> delivered_ids;
+  transfer *tp = nullptr;
+  transfer t(transfer::callbacks {
+    [&](const chunk_request &r) { requests.push_back(r); },
+    [&](std::uint32_t id, std::string, bool) {
+      delivered_ids.push_back(id);
+      if (id == 1) {
+        EXPECT_TRUE(tp->start_read(2, 0, 0, 10));
+      }
+    },
+    [](std::uint32_t, read_error) {},
+  });
+  tp = &t;
+  manifest m;
+  m.offer_id = harness::make_id();
+  m.entries.push_back({entry_kind::file, 10, 0, "a"});
+  t.set_offer(m);
+  ASSERT_TRUE(t.start_read(1, 0, 0, 10));
+  ASSERT_TRUE(t.on_chunk(m.offer_id, requests[0].request_id, 0, 0, std::string(10, 'x')));
+  ASSERT_EQ(requests.size(), 2u);
+  ASSERT_TRUE(t.on_chunk(m.offer_id, requests[1].request_id, 0, 0, std::string(10, 'x')));
+  EXPECT_EQ(delivered_ids, (std::vector<std::uint32_t> {1, 2}));
+}
+
+TEST(ClipboardFilesTransfer, OffsetsAboveFourGiB) {
+  harness h;
+  const std::uint64_t big = 5000000000ull;
+  h.offer({big});
+  const std::uint64_t start = 4294967296ull + 123;
+  ASSERT_TRUE(h.t.start_read(1, 0, start, 9 * MiB));
+  ASSERT_EQ(h.requests.size(), 3u);
+  EXPECT_EQ(h.requests[0].offset, start);
+  EXPECT_EQ(h.requests[1].offset, start + 4 * MiB);
+  EXPECT_EQ(h.requests[2].offset, start + 8 * MiB);
+  EXPECT_EQ(h.requests[2].length, 1 * MiB);
+  for (auto &r : h.requests) {
+    ASSERT_TRUE(h.answer(r, r.length));
+  }
+  ASSERT_EQ(h.out.size(), 3u);
+  EXPECT_TRUE(h.out[2].last);
 }
