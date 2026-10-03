@@ -103,6 +103,7 @@ namespace clipboard::files::agent {
 
   private:
     bool active_ {false};
+    bool overflow_ {false};
     offer_id_t id_ {};
     bool prefetch_ {false};
     std::string buf_;

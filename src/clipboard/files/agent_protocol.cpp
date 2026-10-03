@@ -294,8 +294,22 @@ namespace clipboard::files::agent {
       id_ = part->id;
       buf_.clear();
       active_ = true;
+      overflow_ = false;
     }
     prefetch_ = part->prefetch;
+    constexpr std::size_t max_assembled = (32u << 20) + (64u << 10);
+    if (!overflow_ && buf_.size() + part->data.size() > max_assembled) {
+      overflow_ = true;  // discard the rest of this oversized offer, never deliver a truncated one
+      buf_.clear();
+      buf_.shrink_to_fit();
+    }
+    if (overflow_) {
+      if (part->last) {
+        active_ = false;
+        overflow_ = false;
+      }
+      return std::nullopt;
+    }
     buf_.append(part->data);
     if (!part->last) {
       return std::nullopt;

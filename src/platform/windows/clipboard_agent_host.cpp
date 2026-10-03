@@ -45,6 +45,7 @@ namespace platf::clipboard_agent {
     std::condition_variable g_cv;
     std::jthread g_thread;
     std::function<void(const agent::message &)> g_on_message;
+    std::function<void(bool)> g_on_connection;
     std::deque<std::string> g_queue;
     std::size_t g_queued_bytes = 0;
     std::atomic<bool> g_running {false};
@@ -72,6 +73,35 @@ namespace platf::clipboard_agent {
       connect_failed,
       ended,  ///< connected at some point; ended for any reason
     };
+
+    // Note: agent->core frames must stay small (AsyncNamedPipe has a 64 KiB receive buffer); range_data (up to 1 MiB)
+    // flows core->agent only.
+
+    void notify_connection(bool state) {
+      std::function<void(bool)> cb;
+      {
+        std::lock_guard lock(g_mutex);
+        cb = g_on_connection;
+      }
+      if (cb) {
+        cb(state);
+      }
+    }
+
+    /// True when an agent launched now would land in the active console user's session.
+    bool console_user_available(DWORD session) {
+      if (platf::is_running_as_system()) {
+        HANDLE token = nullptr;
+        if (!WTSQueryUserToken(session, &token)) {
+          return false;
+        }
+        CloseHandle(token);
+        return true;
+      }
+      // Not SYSTEM: the agent would inherit sunshine's own user/session, which must be the console session.
+      DWORD own = 0xFFFFFFFF;
+      return ProcessIdToSessionId(GetCurrentProcessId(), &own) && own == session;
+    }
 
     run_result run_once(const std::filesystem::path &exe, DWORD session, bool use_named, std::chrono::steady_clock::duration &connected_for) {
       connected_for = {};
@@ -102,7 +132,13 @@ namespace platf::clipboard_agent {
         return run_result::connect_failed;
       }
 
+      {
+        std::lock_guard lock(g_mutex);
+        g_queue.clear();  // nothing queued for a previous agent may reach this one
+        g_queued_bytes = 0;
+      }
       std::atomic<bool> broken {false};
+      std::atomic<bool> hello_ok {false};
       std::atomic<std::int64_t> last_rx {std::chrono::steady_clock::now().time_since_epoch().count()};
       auto touch = [&] {
         last_rx.store(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -126,6 +162,13 @@ namespace platf::clipboard_agent {
               if (h->version != agent::protocol_version) {
                 BOOST_LOG(warning) << "Clipboard agent protocol mismatch; expected "sv << agent::protocol_version;
                 broken = true;
+              } else {
+                {
+                  std::lock_guard lock(g_mutex);
+                  g_connected = true;
+                }
+                hello_ok = true;
+                notify_connection(true);
               }
             }
             return;
@@ -135,7 +178,7 @@ namespace platf::clipboard_agent {
             std::lock_guard lock(g_mutex);
             cb = g_on_message;
           }
-          if (cb) {
+          if (cb && hello_ok.load()) {
             cb(*m);
           }
         },
@@ -153,25 +196,32 @@ namespace platf::clipboard_agent {
       }
 
       const auto connected_at = std::chrono::steady_clock::now();
-      g_connected = true;
       auto next_ping = connected_at;
       std::uint32_t nonce = 0;
 
       while (g_running.load() && !broken.load()) {
-        std::deque<std::string> batch;
         {
           std::unique_lock lock(g_mutex);
           g_cv.wait_for(lock, 500ms, [] {
             return !g_running.load() || !g_queue.empty();
           });
-          batch.swap(g_queue);
-          g_queued_bytes = 0;
         }
-        for (const auto &frame : batch) {
-          if (!g_running.load() || broken.load()) {
-            break;
+        // Pop one frame at a time so the byte counter covers everything not yet written (at most one frame is in flight).
+        while (g_running.load() && !broken.load()) {
+          std::string frame;
+          {
+            std::lock_guard lock(g_mutex);
+            if (g_queue.empty()) {
+              break;
+            }
+            frame = std::move(g_queue.front());
+            g_queue.pop_front();
+            g_queued_bytes -= frame.size();
           }
           pipe.send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(frame.data()), frame.size()));
+          if (!pipe.is_connected()) {
+            broken = true;
+          }
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -191,6 +241,10 @@ namespace platf::clipboard_agent {
           break;
         }
         const std::chrono::steady_clock::time_point rx {std::chrono::steady_clock::duration {last_rx.load()}};
+        if (!hello_ok.load() && now - connected_at > 10s) {
+          BOOST_LOG(warning) << "Clipboard agent sent no hello; restarting"sv;
+          break;
+        }
         if (now - rx > kLivenessTimeout) {
           BOOST_LOG(warning) << "Clipboard agent stopped responding; restarting"sv;
           break;
@@ -202,14 +256,19 @@ namespace platf::clipboard_agent {
         }
       }
 
-      g_connected = false;
+      bool was_connected = false;
+      {
+        std::lock_guard lock(g_mutex);
+        was_connected = g_connected;
+        g_connected = false;
+        g_queue.clear();
+        g_queued_bytes = 0;
+      }
       connected_for = std::chrono::steady_clock::now() - connected_at;
       pipe.stop();
       proc.terminate();
-      {
-        std::lock_guard lock(g_mutex);
-        g_queue.clear();
-        g_queued_bytes = 0;
+      if (was_connected) {
+        notify_connection(false);
       }
       return run_result::ended;
     }
@@ -246,6 +305,16 @@ namespace platf::clipboard_agent {
           }
           continue;
         }
+        if (!console_user_available(session)) {
+          if (!logged_no_session) {
+            BOOST_LOG(info) << "Clipboard agent: no logged-on console user yet; waiting"sv;
+            logged_no_session = true;
+          }
+          if (!interruptible_wait(2s)) {
+            return;
+          }
+          continue;
+        }
         logged_no_session = false;
 
         std::chrono::steady_clock::duration connected_for {};
@@ -267,12 +336,13 @@ namespace platf::clipboard_agent {
     }
   }  // namespace
 
-  bool start(std::function<void(const agent::message &)> on_message) {
+  bool start(std::function<void(const agent::message &)> on_message, std::function<void(bool)> on_connection_changed) {
     std::lock_guard lock(g_mutex);
     if (g_running.load()) {
       return true;
     }
     g_on_message = std::move(on_message);
+    g_on_connection = std::move(on_connection_changed);
     g_running = true;
     try {
       g_thread = std::jthread([] {
@@ -304,6 +374,7 @@ namespace platf::clipboard_agent {
     }
     std::lock_guard lock(g_mutex);
     g_on_message = nullptr;
+    g_on_connection = nullptr;
     g_queue.clear();
     g_queued_bytes = 0;
     g_connected = false;
@@ -314,12 +385,9 @@ namespace platf::clipboard_agent {
   }
 
   bool send(const std::string &frame) {
-    if (!g_connected.load()) {
-      return false;
-    }
     {
       std::lock_guard lock(g_mutex);
-      if (g_queued_bytes + frame.size() > kMaxQueuedBytes) {
+      if (!g_connected || g_queued_bytes + frame.size() > kMaxQueuedBytes) {
         return false;
       }
       g_queue.push_back(frame);

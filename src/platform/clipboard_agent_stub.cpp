@@ -5,7 +5,7 @@
 #include "src/platform/clipboard_agent.h"
 
 namespace platf::clipboard_agent {
-  bool start(std::function<void(const clipboard::files::agent::message &)>) {
+  bool start(std::function<void(const clipboard::files::agent::message &)>, std::function<void(bool)>) {
     return false;
   }
 

@@ -191,3 +191,16 @@ TEST(ClipboardFilesProtocol, AssemblerRejectsMalformed) {
   ag::offer_assembler a;
   EXPECT_FALSE(a.add("short"));
 }
+
+TEST(ClipboardFilesProtocol, AssemblerCapsSize) {
+  ag::offer_assembler a;
+  std::string chunk(ag::max_frame_payload, 'z');
+  bool completed = false;
+  for (int i = 0; i < 40; ++i) {
+    auto payload = ag::decode(ag::encode_set_offer_part({make_id(), false, i == 39, chunk}))->payload;
+    if (a.add(payload)) {
+      completed = true;
+    }
+  }
+  EXPECT_FALSE(completed);
+}

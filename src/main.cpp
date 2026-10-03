@@ -578,6 +578,10 @@ int main(int argc, char *argv[]) {
     // pathological message loop cannot hang process teardown indefinitely.
     shutdown_deadline.arm();
 
+  if (clipboard_agent_started) {
+    platf::clipboard_agent::stop();
+  }
+
     auto request_session_monitor_shutdown = [&](bool force_quit_only) {
       if (!force_quit_only) {
         if (session_monitor_hwnd_future.wait_for(1s) == std::future_status::ready) {
@@ -1028,9 +1032,6 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown
   shutdown_event->view();
   clipboard::watcher::stop();
-  if (clipboard_agent_started) {
-    platf::clipboard_agent::stop();
-  }
 #ifdef __linux__
   if (supervised_machine_host) {
     platf::linux_private_display::request_process_shutdown_preserve();
