@@ -218,7 +218,7 @@ namespace platf::clipboard_agent {
       const auto exe = agent_exe_path();
       bool logged_missing = false;
       bool logged_no_session = false;
-      auto cooldown = kMinCooldown;
+      std::chrono::steady_clock::duration cooldown = kMinCooldown;
       unsigned connect_failures = 0;
 
       while (g_running.load()) {
@@ -255,7 +255,7 @@ namespace platf::clipboard_agent {
         }
         if (result == run_result::ended) {
           connect_failures = 0;
-          cooldown = connected_for >= kStableRun ? kMinCooldown : std::min<std::chrono::steady_clock::duration>(cooldown * 2, kMaxCooldown);
+          cooldown = connected_for >= kStableRun ? std::chrono::steady_clock::duration {kMinCooldown} : std::min<std::chrono::steady_clock::duration>(cooldown * 2, kMaxCooldown);
         } else {
           ++connect_failures;
           cooldown = std::min<std::chrono::steady_clock::duration>(cooldown * 2, kMaxCooldown);
