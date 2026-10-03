@@ -45,6 +45,14 @@ Payload: `u8 version = 1`, `u8 offer_id[16]`, `u32 request_id`, `u32 file_index`
 - Requests are issued only on demand (an agent read) or by the prefetcher; nothing is requested for large offers until a paste reads them.
 - Cancellation: when the agent abandons a read (stream released / Explorer cancel), sunshine.exe stops issuing new requests for it; late chunks get 410.
 
+## Performance requirements
+- Target: ≥ 80 MB/s for a single large file on gigabit Ethernet (the link, not TLS, is the limit: AES-GCM runs at ~8 GB/s on the Mac); measured in E2E by timing a 4 GB copy.
+- Pipelining: the host keeps up to 4 requests of 4 MiB in flight per offer (≥ 16 MiB outstanding); the agent's `IStream` reads ahead by the same amount.
+- Connection reuse: chunk POSTs must reuse kept-alive TLS connections (no handshake per chunk). The client uses one `NvHTTP`/`QNetworkAccessManager` per fileserver worker and verifies keep-alive is honoured by the host's HTTPS server (add a test or a log counter of new TLS sessions during a transfer).
+- No blocking on the HTTPS io thread: the chunk handler validates, moves the body to the transfer layer and replies immediately; pipe writes happen on another thread.
+- Copies are acceptable (GB/s memcpy) but avoid per-byte processing.
+- Mac → host traffic flows opposite to the video stream on full-duplex links, so no rate cap is needed here (host → Mac will need one).
+
 ## Host components (Vibepollo)
 - `src/clipboard/files/manifest.{h,cpp}` — portable: MLCF decode/encode, validation, Windows name sanitiser, helpers (total size, top-level items).
 - `src/clipboard/files/transfer.{h,cpp}` — portable: active offer registry, request ids, outstanding-limit queue, timeouts/retry, routing of received chunks to waiting readers, cancellation. Injected callbacks: `send_request(session, request)` and agent delivery. No Windows APIs (unit-testable).
