@@ -80,14 +80,50 @@ namespace platf::clipboard_agent {
     // Note: agent->core frames must stay small (AsyncNamedPipe has a 64 KiB receive buffer); range_data (up to 1 MiB)
     // flows core->agent only.
 
-    void notify_connection(bool state) {
+    // Serialises connection notifications so true/false are delivered in order, once per connected session.
+    // Lock order: g_notify_mutex -> g_mutex. The callback must not call stop(); it may call send().
+    std::mutex g_notify_mutex;
+    bool g_notified = false;  // guarded by g_notify_mutex
+
+    /// Marks the run connected (unless it already ended) and notifies true exactly once.
+    void on_hello(const bool &run_ended) {
+      std::lock_guard notify_lock(g_notify_mutex);
+      std::function<void(bool)> cb;
+      {
+        std::lock_guard lock(g_mutex);
+        if (run_ended || g_notified) {
+          return;
+        }
+        g_connected = true;
+        cb = g_on_connection;
+      }
+      g_notified = true;
+      if (cb) {
+        cb(true);
+      }
+    }
+
+    /// Ends the run's connected state and notifies false if true was delivered.
+    void on_run_end(bool &run_ended) {
+      {
+        std::lock_guard lock(g_mutex);
+        run_ended = true;
+        g_connected = false;
+        g_queue.clear();
+        g_queued_bytes = 0;
+      }
+      std::lock_guard notify_lock(g_notify_mutex);
+      if (!g_notified) {
+        return;
+      }
+      g_notified = false;
       std::function<void(bool)> cb;
       {
         std::lock_guard lock(g_mutex);
         cb = g_on_connection;
       }
       if (cb) {
-        cb(state);
+        cb(false);
       }
     }
 
@@ -142,6 +178,7 @@ namespace platf::clipboard_agent {
       }
       std::atomic<bool> broken {false};
       std::atomic<bool> hello_ok {false};
+      bool run_ended = false;  // written under g_mutex by on_run_end; read under g_mutex by on_hello
       std::atomic<std::int64_t> last_rx {std::chrono::steady_clock::now().time_since_epoch().count()};
       auto touch = [&] {
         last_rx.store(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -166,12 +203,9 @@ namespace platf::clipboard_agent {
                 BOOST_LOG(warning) << "Clipboard agent protocol mismatch; expected "sv << agent::protocol_version;
                 broken = true;
               } else {
-                {
-                  std::lock_guard lock(g_mutex);
-                  g_connected = true;
+                if (!hello_ok.exchange(true)) {
+                  on_hello(run_ended);
                 }
-                hello_ok = true;
-                notify_connection(true);
               }
             }
             return;
@@ -259,20 +293,10 @@ namespace platf::clipboard_agent {
         }
       }
 
-      bool was_connected = false;
-      {
-        std::lock_guard lock(g_mutex);
-        was_connected = g_connected;
-        g_connected = false;
-        g_queue.clear();
-        g_queued_bytes = 0;
-      }
+      on_run_end(run_ended);
       connected_for = std::chrono::steady_clock::now() - connected_at;
       pipe.stop();
       proc.terminate();
-      if (was_connected) {
-        notify_connection(false);
-      }
       return run_result::ended;
     }
 
