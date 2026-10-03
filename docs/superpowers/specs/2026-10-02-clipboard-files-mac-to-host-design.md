@@ -38,7 +38,7 @@ Payload: `u8 version = 1`, `u8 offer_id[16]`, `u32 request_id`, `u32 file_index`
 - Body = the bytes (exactly `length`, or fewer only when the range reaches EOF). `Content-Type: application/octet-stream`.
 - Failure: empty body + header `X-Clipboard-Error: gone | changed | io` (gone = not the client's current offer / session; changed = file size or mtime differs from the manifest or it disappeared; io = read error).
 - Host replies 200 if a matching outstanding request exists, 410 otherwise (late/cancelled) — the client just drops it.
-- HTTPS request body limit must allow 4 MiB + overhead (raise `max_request_streambuf_size` to at least 4 MiB + 64 KiB).
+- HTTPS request body limit: set `max_request_streambuf_size` to `max(clipboard_max_bytes, 32 MiB) + 64 KiB` so both a 32 MiB manifest and a 4 MiB chunk fit.
 
 ### Scheduling (host)
 - Chunk size 4 MiB; at most 4 outstanding requests per offer; per-request timeout 15 s, one retry, then the read fails with an I/O error.
@@ -54,7 +54,7 @@ Payload: `u8 version = 1`, `u8 offer_id[16]`, `u32 request_id`, `u32 file_index`
 - Pipe messages (framed, ≤ 2 MiB per frame → chunks are split into ≤ 1 MiB frames): `SetOffer{offer_id, manifest(sanitised), prefetch}`, `ClearOffer`, agent→core `ReadRange{read_id, file_index, offset, length}`, core→agent `RangeData{read_id, bytes…, last}` / `RangeError{read_id, code}`, agent→core `CancelRead{read_id}`, agent→core `ClipboardSet{sequence_number}` (for echo suppression), `Ping/Pong`.
 - Echo suppression: when the agent reports `ClipboardSet{seq}`, sunshine.exe records `note_host_write(seq, origin client)` exactly like phase-1 writes, so the watcher does not bounce the offer back.
 - `tools/sunshine_clipboard_agent.cpp` (+ small sources): resident user-context process.
-  - STA thread with a message loop, `OleInitialize`; `OleSetClipboard(dataObject)` + `OleFlushClipboard` is NOT used (data stays lazy).
+  - STA thread with a message loop, `OleInitialize`; the data object is placed with `OleSetClipboard(dataObject)`. `OleFlushClipboard` is never called, so the data stays lazy (rendered on demand).
   - `IDataObject` offering `CFSTR_FILEDESCRIPTORW` (all entries, `FD_ATTRIBUTES|FD_FILESIZE|FD_WRITESTIME|FD_PROGRESSUI|FD_UNICODE`, directories with `FILE_ATTRIBUTE_DIRECTORY`, 64-bit sizes), `CFSTR_FILECONTENTS` (`lindex` → a new `IStream` per call), `CFSTR_PREFERREDDROPEFFECT = DROPEFFECT_COPY`, and — only when total size ≤ `clipboard_files_prefetch_bytes` — `CF_HDROP`.
   - `IStream` objects aggregate the free-threaded marshaler so cross-process reads run on RPC threads, not the STA. `Read` blocks until data arrives (read-ahead of up to 4 chunks), supports `Seek`/`Stat`; returns `STG_E_READFAULT` on errors.
   - Prefetch (small offers): starts as soon as the offer is set, writes into `%LOCALAPPDATA%\Temp\Vibepollo\clipboard\<offer>\` preserving the tree; `GetData(CF_HDROP)` waits (≤ 120 s) for completion and returns the top-level paths; on failure it returns `E_FAIL`. Virtual-file reads of a prefetched file are served from disk.
