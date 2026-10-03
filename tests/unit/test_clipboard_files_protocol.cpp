@@ -92,7 +92,8 @@ TEST(ClipboardFilesProtocol, ReadRange) {
   EXPECT_EQ(v->file_index, 2u);
   EXPECT_EQ(v->offset, 5000000000ull);
   EXPECT_EQ(v->length, 4u << 20);
-  EXPECT_EQ(p.substr(4, 16), std::string(make_id(3).begin(), make_id(3).end()));  // 16 raw bytes right after read_id
+  const auto id3 = make_id(3);
+  EXPECT_EQ(p.substr(4, 16), std::string(id3.begin(), id3.end()));  // 16 raw bytes right after read_id
   EXPECT_FALSE(ag::decode_read_range(p.substr(1)));
   EXPECT_FALSE(ag::decode_read_range(p.substr(0, 39)));  // truncated
   EXPECT_FALSE(ag::decode_read_range(p.substr(0, 10)));  // truncated inside the offer id

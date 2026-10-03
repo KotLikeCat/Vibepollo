@@ -23,4 +23,4 @@ if [ ! -f build-tests/build.ninja ]; then
     -DSUNSHINE_NPM_EXECUTABLE="$(cygpath -m '/c/Program Files/nodejs/npm.cmd')" > /dev/null
 fi
 cmake --build build-tests --parallel 8 --target "$@"
-ctest --test-dir build-tests -R "$REGEX" --output-on-failure
+ctest --test-dir build-tests -R "$REGEX" --timeout 300 --output-on-failure
