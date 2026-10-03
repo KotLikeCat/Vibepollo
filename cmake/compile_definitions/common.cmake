@@ -125,6 +125,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/clipboard/bundle.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/manifest.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/manifest.h"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/files/transfer.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/files/transfer.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/types.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/formats.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/formats.h"
