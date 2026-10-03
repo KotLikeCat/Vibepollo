@@ -7,6 +7,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -54,6 +55,7 @@ extern "C" {
 #include "pyrowave_policy.h"
 #include "pyrowave_protocol.h"
 #include "remote_display_topology.h"
+#include "clipboard/files/service.h"
 #include "rtsp.h"
 #include "rtsp_pending_policy.h"
 #include "session_history.h"
@@ -103,6 +105,7 @@ extern "C" {
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
 #define IDX_CLIPBOARD_CHANGED 19
 #define IDX_MIC_AUDIO 20
+#define IDX_CLIPBOARD_FILE_REQUEST 21
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -126,6 +129,7 @@ static const short packetTypes[] = {
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
   0x3003,  // Clipboard changed (Vibepollo protocol extension, host -> client)
   0x3004,  // Microphone audio (Vibepollo protocol extension, client -> host)
+  0x3005,  // Clipboard file range request (Vibepollo protocol extension, host -> client, encrypted control only)
 };
 
 namespace asio = boost::asio;
@@ -457,6 +461,18 @@ namespace stream {
     std::uint32_t formats;
   };
 
+  /// u8 version (1), offer id, request id, file index, offset, length; the header follows control_header_v2.
+  struct control_clipboard_file_request_t {
+    control_header_v2 header;
+
+    std::uint8_t version;
+    std::uint8_t offer_id[16];
+    std::uint32_t request_id;
+    std::uint32_t file_index;
+    std::uint64_t offset;
+    std::uint32_t length;
+  };
+
   typedef struct control_encrypted_t {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001
     std::uint16_t length;  // sizeof(seq) + 16 byte tag + secondary header and data
@@ -681,6 +697,11 @@ namespace stream {
       std::mutex mutex;
       std::optional<std::pair<std::uint32_t, std::uint32_t>> pending;  ///< {seq, formats}; only the latest matters
     } clipboard_notice;
+
+    struct {
+      std::mutex mutex;
+      std::deque<clipboard::files::chunk_request> pending;  ///< every request is sent, in order (never coalesced)
+    } clipboard_file_requests;
 
     std::uint32_t launch_session_id;
     std::mutex metadata_mutex;
@@ -1440,6 +1461,47 @@ namespace stream {
     return 0;
   }
 
+  int send_clipboard_file_request(session_t *session, const clipboard::files::chunk_request &req) {
+    control_clipboard_file_request_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_CLIPBOARD_FILE_REQUEST];
+    plaintext.header.payloadLength = sizeof(control_clipboard_file_request_t) - sizeof(control_header_v2);
+    plaintext.version = 1;
+    std::copy(req.offer_id.begin(), req.offer_id.end(), plaintext.offer_id);
+    plaintext.request_id = util::endian::little(req.request_id);
+    plaintext.file_index = util::endian::little(req.file_index);
+    plaintext.offset = util::endian::little(req.offset);
+    plaintext.length = util::endian::little(req.length);
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      BOOST_LOG(warning) << "Couldn't send clipboard file request "sv << req.request_id;
+      return -1;
+    }
+    return 0;
+  }
+
+  // Kept out of controlBroadcastThread for the same macro-comma reason as take_clipboard_notice.
+  void drain_clipboard_file_requests(session_t *session) {
+    if (!session->control.peer) {
+      return;
+    }
+    for (;;) {
+      clipboard::files::chunk_request req;
+      {
+        std::lock_guard lock {session->clipboard_file_requests.mutex};
+        if (session->clipboard_file_requests.pending.empty()) {
+          return;
+        }
+        req = session->clipboard_file_requests.pending.front();
+        session->clipboard_file_requests.pending.pop_front();
+      }
+      send_clipboard_file_request(session, req);
+    }
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1938,6 +2000,7 @@ namespace stream {
             if (clipboard_notice) {
               send_clipboard_changed(session, clipboard_notice->first, clipboard_notice->second);
             }
+            drain_clipboard_file_requests(session);
           }
 
           ++pos;
@@ -3449,6 +3512,11 @@ namespace stream {
       session.clipboard_notice.pending = std::make_pair(seq, formats);
     }
 
+    void post_clipboard_file_request(session_t &session, const clipboard::files::chunk_request &req) {
+      std::lock_guard lock {session.clipboard_file_requests.mutex};
+      session.clipboard_file_requests.pending.push_back(req);
+    }
+
     crypto::PERM permission(session_t &session) {
       // update_device_info() writes session.permission without any lock; mirror that (no lock here either).
       return session.permission;
@@ -3568,6 +3636,7 @@ namespace stream {
         session.controlEnd.view();
       }
       mic::receiver::session_ended(reinterpret_cast<std::uintptr_t>(&session));
+      clipboard::files::service::session_ended(reinterpret_cast<std::uintptr_t>(&session));
       // Watchdog coverage ends with the thread joins, which are the unbounded and
       // unrecoverable part. Everything below waits on the process-wide lifecycle
       // gate, which other threads legitimately hold for much longer than

@@ -22,6 +22,7 @@
 // local includes
 #include "clipboard/files/agent_protocol.h"
 #include "clipboard/watcher.h"
+#include "clipboard/files/service.h"
 #include "platform/clipboard_agent.h"
 #include "mic/receiver.h"
 #include "confighttp.h"
@@ -1002,10 +1003,7 @@ int main(int argc, char *argv[]) {
   std::thread httpThread {nvhttp::start};
   std::thread rtspThread {rtsp_stream::start};
   clipboard::watcher::start();
-  const bool clipboard_agent_started = config::sunshine.clipboard_files && config::sunshine.clipboard_sync &&
-                                       platf::clipboard_agent::start([](const clipboard::files::agent::message &) {
-                                         // Dispatch of agent messages is wired up with the clipboard file transfer core.
-                                       });
+  clipboard::files::service::start();
 
 #ifdef _WIN32
   // Stale-display cleanup is separate from encoder validation and therefore
@@ -1039,9 +1037,7 @@ int main(int argc, char *argv[]) {
   // never constructs threads or queues work from signal context.
   shutdown_deadline.arm();
 
-  if (clipboard_agent_started) {
-    platf::clipboard_agent::stop();
-  }
+  clipboard::files::service::stop();
 
   // Joins the mic worker, which may be inside a stuck WASAPI call; the watchdog above bounds the wait.
   mic::receiver::shutdown();

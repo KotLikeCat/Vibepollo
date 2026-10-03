@@ -44,6 +44,7 @@
 // local includes
 #include "app_display_policy.h"
 #include "clipboard/bundle.h"
+#include "clipboard/files/service.h"
 #include "clipboard/sync_policy.h"
 #include "config.h"
 #include "display_device.h"
@@ -6010,7 +6011,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type");
-    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv && clipboard_type != "files"sv && clipboard_type != "file-chunk"sv) {
       BOOST_LOG(debug) << "Clipboard type [" << clipboard_type << "] is not supported!";
 
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
@@ -6082,6 +6083,78 @@ namespace nvhttp {
     return;
   }
 
+  // POST /actions/clipboard?type=files | file-chunk. Never blocks: the service only enqueues work.
+  void setClipboardFiles(resp_https_t response, req_https_t request, const verified_client_t &verified_client, const std::string &type, const args_t &args) {
+    const auto bad = [&](SimpleWeb::StatusCode code, bool close = true) {
+      response->write(code);
+      response->close_connection_after_response = close;
+    };
+    if (!config::sunshine.clipboard_files || !config::sunshine.clipboard_sync || !has_client_perm(verified_client, PERM::file_upload)) {
+      log_permission_denied("Clipboard files"sv, "Upload files"sv, verified_client);
+      bad(SimpleWeb::StatusCode::client_error_forbidden);
+      return;
+    }
+
+    if (type == "files"sv) {
+      const auto session = rtsp_stream::find_session(verified_client->uuid);
+      if (!session) {
+        bad(SimpleWeb::StatusCode::client_error_forbidden);
+        return;
+      }
+      const auto body = request->content.string();
+      switch (clipboard::files::service::install_offer(reinterpret_cast<std::uintptr_t>(session.get()), body, verified_client->uuid)) {
+        case clipboard::files::service::offer_result::ok:
+          response->write(SimpleWeb::StatusCode::success_ok);
+          return;
+        case clipboard::files::service::offer_result::bad_manifest:
+          bad(SimpleWeb::StatusCode::client_error_bad_request);
+          return;
+        case clipboard::files::service::offer_result::unsupported:
+          bad(SimpleWeb::StatusCode::server_error_service_unavailable);
+          return;
+      }
+      return;
+    }
+
+    // file-chunk
+    std::uint32_t req_id = 0;
+    std::uint32_t file = 0;
+    std::uint64_t offset = 0;
+    std::string offer_hex;
+    try {
+      offer_hex = get_arg(args, "offer");
+      req_id = static_cast<std::uint32_t>(std::stoul(get_arg(args, "req")));
+      file = static_cast<std::uint32_t>(std::stoul(get_arg(args, "file")));
+      offset = std::stoull(get_arg(args, "offset"));
+    } catch (const std::exception &) {
+      bad(SimpleWeb::StatusCode::client_error_bad_request);
+      return;
+    }
+
+    bool ok;
+    const auto error_header = request->header.find("X-Clipboard-Error");
+    if (error_header != request->header.end()) {
+      clipboard::files::read_error err;
+      if (error_header->second == "gone") {
+        err = clipboard::files::read_error::gone;
+      } else if (error_header->second == "changed") {
+        err = clipboard::files::read_error::changed;
+      } else if (error_header->second == "io") {
+        err = clipboard::files::read_error::io;
+      } else {
+        bad(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      ok = clipboard::files::service::on_chunk_error(offer_hex, req_id, err);
+    } else {
+      const auto endpoint = request->remote_endpoint();
+      const auto key = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+      ok = clipboard::files::service::on_chunk(offer_hex, req_id, file, offset, request->content.string(), key);
+    }
+    // Keep the connection alive in both cases: chunk POSTs reuse one TLS connection.
+    response->write(ok ? SimpleWeb::StatusCode::success_ok : SimpleWeb::StatusCode::client_error_gone);
+  }
+
   void setClipboard(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -6120,6 +6193,11 @@ namespace nvhttp {
 
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       response->close_connection_after_response = true;
+      return;
+    }
+
+    if (clipboard_type == "files"sv || clipboard_type == "file-chunk"sv) {
+      setClipboardFiles(response, request, verified_client, clipboard_type, args);
       return;
     }
 
@@ -6560,7 +6638,7 @@ namespace nvhttp {
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
     // Bounds every HTTPS request body (clipboard bundles are the largest legitimate payload).
-    https_server.config.max_request_streambuf_size = static_cast<std::size_t>(config::sunshine.clipboard_max_bytes) + 64 * 1024;
+    https_server.config.max_request_streambuf_size = std::max<std::size_t>(static_cast<std::size_t>(config::sunshine.clipboard_max_bytes), 32u << 20) + 64 * 1024;
 
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.default_resource["POST"] = not_found<SimpleWeb::HTTP>;

@@ -158,7 +158,7 @@ jobs:
             sunshine_clipboard_helper test_component_clipboard_helper \
             sunshine_clipboard_agent test_component_clipboard_agent \
             test_component_clipboard_files_manifest test_component_clipboard_files_protocol \
-            test_component_clipboard_files_transfer \
+            test_component_clipboard_files_transfer test_component_clipboard_files_service \
             test_component_resource_config_catalog test_component_mic_receiver test_component_mic_sink test_component_mic_sink_select
           ctest --test-dir build-tests -R "clipboard|resource_config_catalog|mic_receiver|mic_sink" --output-on-failure
 

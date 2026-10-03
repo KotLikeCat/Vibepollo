@@ -389,6 +389,11 @@ sunshine_register_component(NAME test_component_clipboard_files_protocol TEST_SO
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/agent_protocol.cpp")
 sunshine_register_component(NAME test_component_clipboard_files_transfer TEST_SOURCE unit/test_clipboard_files_transfer.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/transfer.cpp")
+sunshine_register_component(NAME test_component_clipboard_files_service TEST_SOURCE unit/test_clipboard_files_service.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/service.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/transfer.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/manifest.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/files/agent_protocol.cpp")
 sunshine_register_component(NAME test_component_clipboard_formats TEST_SOURCE unit/test_clipboard_formats.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/clipboard/formats.cpp")
 sunshine_register_component(NAME test_component_clipboard_sync_policy TEST_SOURCE unit/test_clipboard_sync_policy.cpp

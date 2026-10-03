@@ -26,6 +26,10 @@
 #include "stream_protocol.h"
 #include "remote_session.h"
 
+namespace clipboard::files {
+  struct chunk_request;
+}
+
 namespace rtsp_stream {
   struct launch_session_t;
 }
@@ -125,6 +129,8 @@ namespace stream {
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
     std::string uuid(const session_t &session);
+    /// Queues a 0x3005 request for this session's control stream; never coalesced.
+    void post_clipboard_file_request(session_t &session, const clipboard::files::chunk_request &req);
     void post_clipboard_changed(session_t &session, std::uint32_t seq, std::uint32_t formats);
     crypto::PERM permission(session_t &session);
     bool uuid_match(const session_t &session, const std::string_view &uuid);
