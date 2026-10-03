@@ -134,6 +134,7 @@ TEST(ClipboardFilesTransfer, RoundRobinBetweenReads) {
   ASSERT_TRUE(h.t.start_read(1, 0, 0, 64 * MiB));
   ASSERT_TRUE(h.t.start_read(2, 1, 0, 1024));
   ASSERT_TRUE(h.answer(h.requests[0], 4 * MiB));
+  ASSERT_TRUE(h.answer(h.requests[1], 4 * MiB));
   bool small_seen = false;
   for (auto &r : h.requests) {
     small_seen |= r.file_index == 1;
