@@ -159,6 +159,7 @@ foreach(_sunshine_versioned_tool IN ITEMS
         playnite-launcher
         sunshine_wgc_capture
         sunshine_clipboard_helper
+        sunshine_clipboard_agent
         sunshine_display_helper)
     if(TARGET "${_sunshine_versioned_tool}")
         sunshine_add_windows_versioninfo("${_sunshine_versioned_tool}")

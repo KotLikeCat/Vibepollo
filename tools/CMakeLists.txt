@@ -132,6 +132,34 @@ target_link_libraries(sunshine_clipboard_helper
         ${PLATFORM_LIBRARIES})
 target_compile_options(sunshine_clipboard_helper PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
+# Clipboard agent: resident user-session process that owns the clipboard for Mac -> host file offers
+# (virtual files via OLE, CF_HDROP for prefetched offers) and pulls bytes from sunshine.exe over a framed pipe.
+add_executable(sunshine_clipboard_agent
+        clipboard_agent/main.cpp
+        clipboard_agent/data_object.cpp
+        clipboard_agent/file_stream.cpp
+        clipboard_agent/prefetch.cpp
+        clipboard_agent/pipe_range_source.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/files/manifest.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/files/agent_protocol.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/windows/ipc/pipes.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/windows/ipc/misc_utils.cpp
+        ${TOOL_SOURCES})
+set_target_properties(sunshine_clipboard_agent PROPERTIES CXX_STANDARD 23 WIN32_EXECUTABLE TRUE)
+target_link_libraries(sunshine_clipboard_agent
+        ${Boost_LIBRARIES}
+        ${CMAKE_THREAD_LIBS_INIT}
+        ole32
+        oleaut32
+        uuid
+        shell32
+        shlwapi
+        user32
+        gdi32
+        wtsapi32
+        ${PLATFORM_LIBRARIES})
+target_compile_options(sunshine_clipboard_agent PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+
 # Display settings helper: detached helper that applies/reverts display settings via IPC.
 # One exe hosts both engines (legacy + v2), selected by --engine= or persisted state.
 add_executable(sunshine_display_helper
