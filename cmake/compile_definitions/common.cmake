@@ -123,6 +123,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/bundle.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/bundle.h"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/files/agent_protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/files/agent_protocol.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/manifest.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/manifest.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/files/transfer.cpp"
