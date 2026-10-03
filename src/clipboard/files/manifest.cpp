@@ -267,8 +267,8 @@ namespace clipboard::files {
         }
       };
       trim();
-      // Truncate first (leaving room for a possible reserved-name "_"), then apply the reserved rule.
-      s = fit_component(s, max_component_utf16 - 1);
+      // Truncate first, then apply the reserved rule (truncation may itself create a reserved base).
+      s = fit_component(s);
       trim();
       if (s.empty()) {
         return "_";
@@ -277,6 +277,11 @@ namespace clipboard::files {
       const auto base = std::string_view(s).substr(0, dot);
       if (is_reserved_base(base)) {
         s.insert(base.size(), "_");
+        if (utf16_len(s) > max_component_utf16) {
+          // Cut the tail so the "_" after the reserved base survives.
+          s = truncate_utf16(s, max_component_utf16);
+          trim();
+        }
       }
       return s;
     }
