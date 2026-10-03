@@ -160,6 +160,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/audio_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/audio_policy.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/clipboard_agent.h"
         "${CMAKE_SOURCE_DIR}/src/platform/clipboard_sync.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common_services.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/common_services.h"

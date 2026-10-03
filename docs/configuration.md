@@ -316,6 +316,54 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### clipboard_files
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allow copying files and folders from a Moonlight client to the host clipboard (paste in Explorer).
+            Requires clipboard_sync. A client also needs the clipboard set and file upload permissions.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_files = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### clipboard_files_prefetch_bytes
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Maximum number of bytes of copied files that are transferred in the background right after the copy,
+            before the user pastes (0 to 4294967296). Set 0 to disable prefetching; files are then fetched on paste.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            268435456
+            @endcode (256 MiB)</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_files_prefetch_bytes = 0
+            @endcode</td>
+    </tr>
+</table>
+
 ### update_check_interval
 
 <table>

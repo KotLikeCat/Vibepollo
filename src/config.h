@@ -513,6 +513,8 @@ namespace config {
     int realtime_stats_poll_interval_ms {2000};  ///< Host stats sampler interval in milliseconds
     bool clipboard_sync {true};  ///< Sync the host clipboard with Moonlight clients that support it
     int clipboard_max_bytes {32 * 1024 * 1024};  ///< Max size of one clipboard bundle in bytes
+    bool clipboard_files {true};  ///< Allow copying files from Moonlight clients to the host clipboard
+    std::uint64_t clipboard_files_prefetch_bytes {268435456};  ///< Max bytes of clipboard files prefetched on copy (0 disables)
   };
 
   extern video_t video;

@@ -185,8 +185,6 @@ TEST(ClipboardFilesProtocol, AssemblerRestartsOnNewOffer) {
   ASSERT_TRUE(r);
   EXPECT_EQ(std::get<0>(*r), make_id(2));
   EXPECT_EQ(std::get<2>(*r), "new");
-  // stale tail of the first offer must not complete anything
-  EXPECT_FALSE(a.add(ag::decode(first[1])->payload) && false);
 }
 
 TEST(ClipboardFilesProtocol, AssemblerRejectsMalformed) {

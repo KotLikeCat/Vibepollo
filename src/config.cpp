@@ -2356,6 +2356,29 @@ namespace config {
     int_between_f(vars, "realtime_stats_poll_interval_ms", sunshine.realtime_stats_poll_interval_ms, {250, 60000});
     bool_f(vars, "clipboard_sync", sunshine.clipboard_sync);
     int_between_f(vars, "clipboard_max_bytes", sunshine.clipboard_max_bytes, {1024 * 1024, 256 * 1024 * 1024});
+    bool_f(vars, "clipboard_files", sunshine.clipboard_files);
+    {
+      std::string prefetch_text;
+      string_f(vars, "clipboard_files_prefetch_bytes", prefetch_text);
+      boost::algorithm::trim(prefetch_text);
+      if (!prefetch_text.empty()) {
+        constexpr std::uint64_t kMaxPrefetch = 4294967296ULL;
+        std::uint64_t parsed = 0;
+        bool valid = true;
+        for (const char ch : prefetch_text) {
+          if (ch < '0' || ch > '9' || parsed > kMaxPrefetch) {
+            valid = false;
+            break;
+          }
+          parsed = parsed * 10 + static_cast<std::uint64_t>(ch - '0');
+        }
+        if (valid && parsed <= kMaxPrefetch) {
+          sunshine.clipboard_files_prefetch_bytes = parsed;
+        } else {
+          BOOST_LOG(warning) << "Ignoring invalid clipboard_files_prefetch_bytes '" << prefetch_text << "'; use 0 to 4294967296.";
+        }
+      }
+    }
 
     // Web-UI-only realtime stats preferences; consumed here so they are not
     // reported as unrecognized options.

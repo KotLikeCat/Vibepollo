@@ -182,6 +182,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_win.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_win_route.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_agent_host.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/mic_sink.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/host_stats.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ipc/pipes.h"

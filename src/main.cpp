@@ -20,7 +20,9 @@
 #include <thread>
 
 // local includes
+#include "clipboard/files/agent_protocol.h"
 #include "clipboard/watcher.h"
+#include "platform/clipboard_agent.h"
 #include "mic/receiver.h"
 #include "confighttp.h"
 #include "entry_handler.h"
@@ -1000,6 +1002,10 @@ int main(int argc, char *argv[]) {
   std::thread httpThread {nvhttp::start};
   std::thread rtspThread {rtsp_stream::start};
   clipboard::watcher::start();
+  const bool clipboard_agent_started = config::sunshine.clipboard_files && config::sunshine.clipboard_sync &&
+                                       platf::clipboard_agent::start([](const clipboard::files::agent::message &) {
+                                         // Dispatch of agent messages is wired up with the clipboard file transfer core.
+                                       });
 
 #ifdef _WIN32
   // Stale-display cleanup is separate from encoder validation and therefore
@@ -1022,6 +1028,9 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown
   shutdown_event->view();
   clipboard::watcher::stop();
+  if (clipboard_agent_started) {
+    platf::clipboard_agent::stop();
+  }
 #ifdef __linux__
   if (supervised_machine_host) {
     platf::linux_private_display::request_process_shutdown_preserve();

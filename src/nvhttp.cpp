@@ -59,6 +59,7 @@
 #include "nvhttp.h"
 #include "remote_session.h"
 #include "remote_display_topology.h"
+#include "platform/clipboard_agent.h"
 #include "platform/clipboard_sync.h"
 #include "platform/mic_sink.h"
 #include "platform/common.h"
@@ -3791,6 +3792,9 @@ namespace nvhttp {
 
       if (config::sunshine.clipboard_sync && platf::clipboard_sync::supported()) {
         tree.put("root.ClipboardSync", 1);
+        if (config::sunshine.clipboard_files && platf::clipboard_agent::connected()) {
+          tree.put("root.ClipboardFiles", 1);
+        }
       }
 
       if (config::audio.mic_passthrough && mic_sink_available_cached()) {

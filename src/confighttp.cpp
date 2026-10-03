@@ -3368,7 +3368,9 @@ namespace confighttp {
         "pkey",
         "cert",
         "clipboard_sync",
-        "clipboard_max_bytes"
+        "clipboard_max_bytes",
+        "clipboard_files",
+        "clipboard_files_prefetch_bytes"
       };
       bool restart_required = false;
       for (const auto &k : changed_keys) {
@@ -3479,7 +3481,9 @@ namespace confighttp {
         "pkey",
         "cert",
         "clipboard_sync",
-        "clipboard_max_bytes"
+        "clipboard_max_bytes",
+        "clipboard_files",
+        "clipboard_files_prefetch_bytes"
       };
       bool restart_required = false;
       for (const auto &k : changed_keys) {
