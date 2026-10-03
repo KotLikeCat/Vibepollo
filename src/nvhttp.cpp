@@ -6011,7 +6011,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type");
-    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv && clipboard_type != "files"sv && clipboard_type != "file-chunk"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv) {
       BOOST_LOG(debug) << "Clipboard type [" << clipboard_type << "] is not supported!";
 
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
@@ -6109,6 +6109,7 @@ namespace nvhttp {
           return;
         case clipboard::files::service::offer_result::bad_manifest:
           // The client shows the reason (manifest error_name or windows_path_too_long).
+          BOOST_LOG(info) << "Clipboard files: offer from ["sv << verified_client->name << "] rejected: "sv << reason;
           response->write(SimpleWeb::StatusCode::client_error_bad_request, SimpleWeb::CaseInsensitiveMultimap {{"X-Clipboard-Error", reason}});
           response->close_connection_after_response = true;
           return;
@@ -6178,7 +6179,7 @@ namespace nvhttp {
 
     auto args = request->parse_query_string();
     auto clipboard_type = get_arg(args, "type");
-    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv) {
+    if (clipboard_type != "text"sv && clipboard_type != "bundle"sv && clipboard_type != "files"sv && clipboard_type != "file-chunk"sv) {
       BOOST_LOG(debug) << "Clipboard type [" << clipboard_type << "] is not supported!";
 
       response->write(SimpleWeb::StatusCode::client_error_bad_request);
