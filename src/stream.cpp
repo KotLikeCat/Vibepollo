@@ -1498,7 +1498,10 @@ namespace stream {
         req = session->clipboard_file_requests.pending.front();
         session->clipboard_file_requests.pending.pop_front();
       }
-      send_clipboard_file_request(session, req);
+      if (send_clipboard_file_request(session, req) != 0) {
+        // Fail fast: the scheduler retries or fails the request now instead of after its 15 s timeout.
+        clipboard::files::service::on_chunk_error(clipboard::files::offer_id_hex(req.offer_id), req.request_id, clipboard::files::read_error::io);
+      }
     }
   }
 
@@ -2027,7 +2030,8 @@ namespace stream {
       }
 
       // Haptic samples must keep flowing even when the player is not moving.
-      server->iterate(haptics_client ? 5ms : 150ms);
+      // Active clipboard file reads need prompt delivery of queued 0x3005 requests.
+      server->iterate((haptics_client || clipboard::files::service::active()) ? 5ms : 150ms);
     }
 
     // Let all remaining connections know the server is shutting down

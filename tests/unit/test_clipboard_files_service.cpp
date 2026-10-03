@@ -287,9 +287,85 @@ TEST_F(fixture, ThroughputLogCountsDistinctConnections) {
   ASSERT_EQ(posted.size(), 2u);
   for (std::size_t i = 0; i < posted.size(); ++i) {
     const auto &r = posted[i].second;
-    EXPECT_TRUE(svc::on_chunk(offer_id_hex(make_id()), r.request_id, 0, r.offset, std::string(r.length, 'x'), i == 0 ? "9.9.9.9:1" : "9.9.9.9:1"));
+    EXPECT_TRUE(svc::on_chunk(offer_id_hex(make_id()), r.request_id, 0, r.offset, std::string(r.length, 'x'), i == 0 ? "9.9.9.9:1" : "9.9.9.9:2"));
   }
   svc::session_ended(owner_session);
   ASSERT_EQ(logs.size(), 1u);
-  EXPECT_NE(logs[0].find("2 chunks, 8388608 bytes over 1 connections"), std::string::npos) << logs[0];
+  EXPECT_NE(logs[0].find("2 chunks, 8388608 bytes over 2 connections"), std::string::npos) << logs[0];
+}
+
+TEST_F(fixture, SameConnectionKeyCountsOnce) {
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(8 * MiB)), svc::offer_result::ok);
+  read_range(1, make_id(), 0, 0, 8 * MiB);
+  for (const auto &p : posted) {
+    EXPECT_TRUE(svc::on_chunk(offer_id_hex(make_id()), p.second.request_id, 0, p.second.offset, std::string(p.second.length, 'x'), "9.9.9.9:1"));
+  }
+  svc::session_ended(owner_session);
+  ASSERT_EQ(logs.size(), 1u);
+  EXPECT_NE(logs[0].find("over 1 connections"), std::string::npos) << logs[0];
+}
+
+TEST_F(fixture, ActiveTracksReads) {
+  EXPECT_FALSE(svc::active());
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(3 * MiB)), svc::offer_result::ok);
+  read_range(1, make_id(), 0, 0, 100);
+  EXPECT_TRUE(svc::active());
+  svc::on_chunk(offer_id_hex(make_id()), posted.at(0).second.request_id, 0, 0, std::string(100, 'x'));
+  EXPECT_FALSE(svc::active());  // completed
+  read_range(2, make_id(), 0, 0, 100);
+  EXPECT_TRUE(svc::active());
+  svc::on_chunk_error(offer_id_hex(make_id()), posted.at(1).second.request_id, read_error::io);
+  EXPECT_FALSE(svc::active());  // failed
+  read_range(3, make_id(), 0, 0, 100);
+  EXPECT_TRUE(svc::active());
+  svc::handle_agent_message({ag::msg::cancel_read, ag::encode_cancel_read(3).substr(1)});
+  EXPECT_FALSE(svc::active());  // cancelled
+  read_range(4, make_id(), 0, 0, 100);
+  EXPECT_TRUE(svc::active());
+  svc::session_ended(owner_session);
+  EXPECT_FALSE(svc::active());  // offer cleared
+}
+
+TEST(clipboard_files_query, StrictParsing) {
+  const std::string id = offer_id_hex(make_id());
+  EXPECT_TRUE(svc::parse_chunk_query(id, "1", "2", "3").has_value());
+  EXPECT_TRUE(svc::parse_chunk_query(id, "4294967295", "0", "18446744073709551615").has_value());
+  EXPECT_FALSE(svc::parse_chunk_query(id, "-1", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, " 1", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, "1x", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, "4294967296", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, "", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, "1", "+1", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id, "1", "0", "18446744073709551616"));
+  EXPECT_FALSE(svc::parse_chunk_query(id.substr(1), "1", "0", "0"));
+  EXPECT_FALSE(svc::parse_chunk_query(id + "0", "1", "0", "0"));
+  auto bad = id;
+  bad[5] = 'g';
+  EXPECT_FALSE(svc::parse_chunk_query(bad, "1", "0", "0"));
+}
+
+TEST_F(fixture, InstallRechecksOwnerSessionAlive) {
+  svc::hooks h;
+  h.send_frame = [](const std::string &) { return true; };
+  h.agent_connected = [] { return true; };
+  h.post_request = [](std::uintptr_t, const chunk_request &) { return true; };
+  h.session_alive = [](std::uintptr_t) { return false; };
+  svc::set_test_hooks(std::move(h));
+  EXPECT_EQ(svc::install_offer(owner_session, make_mlcf(MiB)), svc::offer_result::unsupported);
+  read_range(1, make_id(), 0, 0, 10);
+  EXPECT_FALSE(svc::active());
+}
+
+TEST_F(fixture, LateClipboardSetKeepsOriginAfterClear) {
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(10), "client-uuid"), svc::offer_result::ok);
+  svc::session_ended(owner_session);
+  svc::handle_agent_message({ag::msg::clipboard_set, ag::encode_clipboard_set(7).substr(1)});
+  ASSERT_EQ(notes.size(), 1u);
+  EXPECT_EQ(notes[0].second, "client-uuid");
+}
+
+TEST_F(fixture, ClipboardSetWithoutOriginIsSkipped) {
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(10)), svc::offer_result::ok);
+  svc::handle_agent_message({ag::msg::clipboard_set, ag::encode_clipboard_set(7).substr(1)});
+  EXPECT_TRUE(notes.empty());
 }

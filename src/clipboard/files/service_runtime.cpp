@@ -48,6 +48,14 @@ namespace clipboard::files::service {
       return platf::clipboard_agent::send(frame);
     };
     h.post_request = post_request;
+    h.session_alive = [](std::uintptr_t id) {
+      for (const auto &session : rtsp_stream::get_sessions_snapshot()) {
+        if (reinterpret_cast<std::uintptr_t>(session.get()) == id) {
+          return true;
+        }
+      }
+      return false;
+    };
     h.agent_connected = [] {
       return platf::clipboard_agent::connected();
     };

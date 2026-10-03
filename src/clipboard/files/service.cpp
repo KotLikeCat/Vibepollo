@@ -7,6 +7,8 @@
 #include "manifest.h"
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -34,6 +36,8 @@ namespace clipboard::files::service {
       std::uintptr_t owner = 0;
       std::string owner_uuid;
       std::optional<offer_id_t> offer;
+      std::set<std::uint32_t> active_reads;
+      std::string last_origin;  ///< origin of the most recent offer; survives clear so a late clipboard_set still resolves
       std::set<std::uint32_t> aborted;  ///< reads already failed toward the agent; late events are ignored
       offer_stats stats;
     };
@@ -41,6 +45,20 @@ namespace clipboard::files::service {
     state_t &st() {
       static state_t s;
       return s;
+    }
+
+    std::atomic<bool> g_active {false};
+
+    void read_started(std::uint32_t id) {
+      std::lock_guard lock {st().mutex};
+      st().active_reads.insert(id);
+      g_active.store(true, std::memory_order_release);
+    }
+
+    void read_finished(std::uint32_t id) {
+      std::lock_guard lock {st().mutex};
+      st().active_reads.erase(id);
+      g_active.store(!st().active_reads.empty(), std::memory_order_release);
     }
 
     transfer::callbacks make_callbacks();
@@ -78,6 +96,7 @@ namespace clipboard::files::service {
           return;
         }
       }
+      read_finished(read_id);
       send_error(read_id, e);
       st().tr->cancel_read(read_id);
     }
@@ -96,9 +115,13 @@ namespace clipboard::files::service {
         }
         pos += n;
       } while (pos < data.size());
+      if (last) {
+        read_finished(read_id);
+      }
     }
 
     void do_fail(std::uint32_t read_id, read_error e) {
+      read_finished(read_id);
       {
         std::lock_guard lock {st().mutex};
         if (!st().aborted.insert(read_id).second) {
@@ -165,6 +188,8 @@ namespace clipboard::files::service {
       {
         std::lock_guard lock {st().mutex};
         st().aborted.clear();
+        st().active_reads.clear();
+        g_active.store(false, std::memory_order_release);
       }
       if (tell_agent && offer) {
         send_frame(agent::encode_clear_offer(*offer));
@@ -182,11 +207,45 @@ namespace clipboard::files::service {
       s.owner_uuid.clear();
       s.offer.reset();
       s.aborted.clear();
+      s.active_reads.clear();
+      g_active.store(false);
+      s.last_origin.clear();
       s.stats = {};
       s.prefetch_bytes = 0;
       s.tr.reset();
     }
     ensure_transfer(opt);
+  }
+
+  bool active() {
+    return g_active.load(std::memory_order_acquire);
+  }
+
+  namespace {
+    template<class T>
+    std::optional<T> parse_dec(std::string_view v) {
+      T out {};
+      const auto *end = v.data() + v.size();
+      const auto r = std::from_chars(v.data(), end, out, 10);
+      if (v.empty() || r.ec != std::errc {} || r.ptr != end) {
+        return std::nullopt;
+      }
+      return out;
+    }
+  }  // namespace
+
+  std::optional<chunk_query> parse_chunk_query(std::string_view offer, std::string_view req, std::string_view file, std::string_view offset) {
+    if (offer.size() != 32) {
+      return std::nullopt;
+    }
+    const auto id = parse_offer_id_hex(offer);
+    const auto r = parse_dec<std::uint32_t>(req);
+    const auto f = parse_dec<std::uint32_t>(file);
+    const auto o = parse_dec<std::uint64_t>(offset);
+    if (!id || !r || !f || !o) {
+      return std::nullopt;
+    }
+    return chunk_query {*id, *r, *f, *o};
   }
 
   void set_prefetch_bytes(std::uint64_t bytes) {
@@ -223,6 +282,7 @@ namespace clipboard::files::service {
       prefetch = st().prefetch_bytes > 0 && total_size(decoded.value) <= st().prefetch_bytes;
       st().has_owner = true;
       st().owner = session_id;
+      st().last_origin = origin_uuid;
       st().owner_uuid = std::move(origin_uuid);
       st().offer = decoded.value.offer_id;
     }
@@ -233,6 +293,17 @@ namespace clipboard::files::service {
         clear_current(true);
         return offer_result::unsupported;
       }
+    }
+    // The owning session may have ended while we were installing (session_ended is serialized on install_mutex,
+    // but it could have run before the owner was set).
+    std::function<bool(std::uintptr_t)> alive;
+    {
+      std::lock_guard lock {st().mutex};
+      alive = st().h.session_alive;
+    }
+    if (alive && !alive(session_id)) {
+      clear_current(true);
+      return offer_result::unsupported;
     }
     return offer_result::ok;
   }
@@ -307,13 +378,16 @@ namespace clipboard::files::service {
             send_error(r->read_id, read_error::gone);
             return;
           }
+          read_started(r->read_id);
           if (!st().tr->start_read(r->read_id, r->file_index, r->offset, r->length)) {
+            read_finished(r->read_id);
             send_error(r->read_id, read_error::io);
           }
           return;
         }
       case agent::msg::cancel_read:
         if (const auto id = agent::decode_cancel_read(m.payload)) {
+          read_finished(*id);
           st().tr->cancel_read(*id);
         }
         return;
@@ -337,9 +411,9 @@ namespace clipboard::files::service {
           {
             std::lock_guard lock {st().mutex};
             note = st().h.note_clipboard_set;
-            uuid = st().owner_uuid;
+            uuid = st().last_origin;
           }
-          if (note) {
+          if (note && !uuid.empty()) {
             note(*seq, uuid);
           }
         }

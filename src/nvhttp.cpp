@@ -6117,19 +6117,15 @@ namespace nvhttp {
     }
 
     // file-chunk
-    std::uint32_t req_id = 0;
-    std::uint32_t file = 0;
-    std::uint64_t offset = 0;
-    std::string offer_hex;
-    try {
-      offer_hex = get_arg(args, "offer");
-      req_id = static_cast<std::uint32_t>(std::stoul(get_arg(args, "req")));
-      file = static_cast<std::uint32_t>(std::stoul(get_arg(args, "file")));
-      offset = std::stoull(get_arg(args, "offset"));
-    } catch (const std::exception &) {
+    const auto query = clipboard::files::service::parse_chunk_query(get_arg(args, "offer", ""), get_arg(args, "req", ""), get_arg(args, "file", ""), get_arg(args, "offset", ""));
+    if (!query) {
       bad(SimpleWeb::StatusCode::client_error_bad_request);
       return;
     }
+    const auto req_id = query->req;
+    const auto file = query->file;
+    const auto offset = query->offset;
+    const auto offer_hex = clipboard::files::offer_id_hex(query->offer);
 
     bool ok;
     const auto error_header = request->header.find("X-Clipboard-Error");
