@@ -5,7 +5,6 @@
 #include "manifest.h"
 
 #include <algorithm>
-#include <cwctype>
 #include <set>
 #include <unordered_map>
 
@@ -63,16 +62,95 @@ namespace clipboard::files {
       return true;
     }
 
-    /// Case-insensitive comparison key (simple per-code-unit lowercase).
+    /// Locale-independent simple case fold for one UTF-16 code unit (NTFS-like for common scripts).
+    char16_t fold_unit(char16_t c) {
+      if (c >= u'A' && c <= u'Z') {
+        return static_cast<char16_t>(c + 0x20);
+      }
+      if (c < 0xC0) {
+        return c;
+      }
+      if (c <= 0xDE) {
+        return c == 0xD7 ? c : static_cast<char16_t>(c + 0x20);
+      }
+      if (c >= 0x100 && c <= 0x17F) {
+        if (c == 0x130 || c == 0x131 || c == 0x138 || c == 0x149 || c == 0x17F) {
+          return c;
+        }
+        if (c == 0x178) {
+          return 0xFF;
+        }
+        if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) {
+          return (c & 1) ? static_cast<char16_t>(c + 1) : c;  // odd = upper in these ranges
+        }
+        return (c & 1) ? c : static_cast<char16_t>(c + 1);
+      }
+      if (c >= 0x391 && c <= 0x3A9 && c != 0x3A2) {
+        return static_cast<char16_t>(c + 0x20);
+      }
+      if (c >= 0x410 && c <= 0x42F) {
+        return static_cast<char16_t>(c + 0x20);
+      }
+      if (c >= 0x400 && c <= 0x40F) {
+        return static_cast<char16_t>(c + 0x50);
+      }
+      if (c >= 0x460 && c <= 0x4FF) {
+        return (c & 1) ? c : static_cast<char16_t>(c + 1);
+      }
+      return c;
+    }
+
+    /// Case-insensitive comparison key.
     std::u16string fold_key(std::string_view s) {
       std::u16string u;
       if (!to_utf16(s, u)) {
         u.assign(s.begin(), s.end());
       }
       for (auto &c : u) {
-        c = static_cast<char16_t>(std::towlower(static_cast<wint_t>(c)));
+        c = fold_unit(c);
       }
       return u;
+    }
+
+    std::size_t utf16_len(std::string_view s) {
+      std::size_t n = 0;
+      for (const char ch : s) {
+        const auto b = static_cast<unsigned char>(ch);
+        if ((b & 0xC0) != 0x80) {
+          n += b >= 0xF0 ? 2 : 1;
+        }
+      }
+      return n;
+    }
+
+    /// Truncates on a code point boundary to at most max_units UTF-16 units.
+    std::string truncate_utf16(std::string_view s, std::size_t max_units) {
+      std::size_t n = 0;
+      std::size_t i = 0;
+      while (i < s.size()) {
+        const auto b = static_cast<unsigned char>(s[i]);
+        const std::size_t len = b < 0x80 ? 1 : b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : 2;
+        const std::size_t units = len == 4 ? 2 : 1;
+        if (n + units > max_units) {
+          break;
+        }
+        n += units;
+        i += len;
+      }
+      return std::string(s.substr(0, i));
+    }
+
+    /// Shrinks the part before the last extension so the whole name fits max_component_utf16 units.
+    std::string fit_component(const std::string &name) {
+      const auto total = utf16_len(name);
+      if (total <= max_component_utf16) {
+        return name;
+      }
+      const auto dot = name.rfind('.');
+      const bool has_ext = dot != std::string::npos && dot > 0 && utf16_len(name.substr(dot)) < max_component_utf16;
+      const auto ext = has_ext ? name.substr(dot) : std::string();
+      const auto stem = has_ext ? name.substr(0, dot) : name;
+      return truncate_utf16(stem, max_component_utf16 - utf16_len(ext)) + ext;
     }
 
     struct reader {
@@ -188,7 +266,7 @@ namespace clipboard::files {
       if (is_reserved_base(base)) {
         s.insert(base.size(), "_");
       }
-      return s;
+      return fit_component(s);
     }
   }  // namespace
 
@@ -260,6 +338,7 @@ namespace clipboard::files {
       if (const auto err = validate_path(e.path); err != manifest_error::none) {
         return fail(err);
       }
+      // The format requires a directory entry to precede its children (the Mac client emits pre-order).
       const auto parent = parent_of(e.path);
       if (!parent.empty() && !dirs.contains(fold_key(parent))) {
         return fail(manifest_error::missing_parent);
@@ -349,7 +428,8 @@ namespace clipboard::files {
         const auto stem = has_ext ? name.substr(0, dot) : name;
         const auto ext = has_ext ? name.substr(dot) : std::string();
         for (int n = 2;; ++n) {
-          auto candidate = stem + " (" + std::to_string(n) + ")" + ext;
+          const auto tail = " (" + std::to_string(n) + ")" + ext;
+          auto candidate = truncate_utf16(stem, max_component_utf16 - std::min(utf16_len(tail), max_component_utf16)) + tail;
           if (!names.contains(fold_key(candidate))) {
             name = std::move(candidate);
             break;

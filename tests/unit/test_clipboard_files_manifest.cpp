@@ -194,3 +194,40 @@ TEST(ClipboardFilesManifest, TotalSizeAndHex) {
   EXPECT_FALSE(parse_offer_id_hex("0001").has_value());
   EXPECT_FALSE(parse_offer_id_hex("zz0102030405060708090a0b0c0d0e0f").has_value());
 }
+
+TEST(ClipboardFilesManifest, UnicodeCaseInsensitive) {
+  EXPECT_EQ(decode_err(make({dir("Папка"), file("папка")})), manifest_error::duplicate_path);
+  EXPECT_EQ(decode_err(make({dir("папка"), file("Папка/x")})), manifest_error::none);
+  const auto out = sanitize_paths({"Ж.txt", "ж.txt"});
+  EXPECT_EQ(out[0], "Ж.txt");
+  EXPECT_EQ(out[1], "ж (2).txt");
+}
+
+TEST(ClipboardFilesManifest, ReservedNamesAndLength) {
+  const auto out = sanitize_paths({"CONSOLE.txt", "Con.tar.gz"});
+  EXPECT_EQ(out[0], "CONSOLE.txt");
+  EXPECT_EQ(out[1], "Con_.tar.gz");
+  const auto longname = std::string(251, 'a') + ".txt";  // 255 units
+  const auto col = sanitize_paths({longname, longname + ""});
+  EXPECT_EQ(col[0], longname);
+  EXPECT_LE(col[1].size(), 255u);
+  EXPECT_NE(col[1], col[0]);
+  EXPECT_EQ(col[1].substr(col[1].size() - 4), ".txt");
+  const auto con = sanitize_paths({"con" + std::string(248, 'b') + ".c"});  // no reserved; sanity
+  EXPECT_LE(con[0].size(), 255u);
+  const auto res = sanitize_paths({"con." + std::string(251, 'x')});
+  EXPECT_LE(res[0].size(), 255u);
+}
+
+TEST(ClipboardFilesManifest, RejectsMalformedEntries) {
+  auto data = encode_manifest(make({file("a.txt")}));
+  auto bad_kind = data;
+  bad_kind[25] = 9;
+  EXPECT_EQ(decode_manifest(bad_kind).error, manifest_error::bad_component);
+  EXPECT_EQ(decode_err(make({file("a\xff.txt")})), manifest_error::bad_component);
+  EXPECT_EQ(decode_err(make({file("a\xc3.txt")})), manifest_error::bad_component);
+  auto past_end = data;
+  past_end[25 + 1 + 8 + 8] = 100;  // path_len low byte
+  EXPECT_EQ(decode_manifest(past_end).error, manifest_error::truncated);
+  EXPECT_NE(decode_manifest(std::string(max_manifest_bytes + 1, 'x')).error, manifest_error::none);
+}
