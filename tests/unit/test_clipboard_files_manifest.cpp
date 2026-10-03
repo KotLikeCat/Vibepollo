@@ -231,3 +231,19 @@ TEST(ClipboardFilesManifest, RejectsMalformedEntries) {
   EXPECT_EQ(decode_manifest(past_end).error, manifest_error::truncated);
   EXPECT_NE(decode_manifest(std::string(max_manifest_bytes + 1, 'x')).error, manifest_error::none);
 }
+
+TEST(ClipboardFilesManifest, SanitizerFixRound2) {
+  const auto res = sanitize_paths({"con." + std::string(251, 'x')});
+  EXPECT_LE(res[0].size(), 255u);
+  EXPECT_EQ(res[0].substr(0, res[0].find('.')), "con_");
+  // Truncated stem must not end with a space or dot.
+  const auto sp = sanitize_paths({std::string(253, 'a') + " b"});
+  EXPECT_NE(sp[0].back(), ' ');
+  EXPECT_LE(sp[0].size(), 255u);
+  const auto dots = sanitize_paths({std::string(253, 'a') + ".. b"});
+  EXPECT_NE(dots[0].back(), '.');
+  EXPECT_NE(dots[0].back(), ' ');
+  const auto col = sanitize_paths({"Ӂ.txt", "ӂ.txt"});
+  EXPECT_EQ(col[1], "ӂ (2).txt");
+  EXPECT_EQ(decode_err(make({file("Ӂ"), file("ӂ")})), manifest_error::duplicate_path);
+}

@@ -94,8 +94,14 @@ namespace clipboard::files {
       if (c >= 0x400 && c <= 0x40F) {
         return static_cast<char16_t>(c + 0x50);
       }
-      if (c >= 0x460 && c <= 0x4FF) {
+      if ((c >= 0x460 && c <= 0x481) || (c >= 0x48A && c <= 0x4BF) || (c >= 0x4D0 && c <= 0x4FF)) {
         return (c & 1) ? c : static_cast<char16_t>(c + 1);
+      }
+      if (c == 0x4C0) {
+        return 0x4CF;
+      }
+      if (c >= 0x4C1 && c <= 0x4CE) {
+        return (c & 1) ? static_cast<char16_t>(c + 1) : c;
       }
       return c;
     }
@@ -141,16 +147,16 @@ namespace clipboard::files {
     }
 
     /// Shrinks the part before the last extension so the whole name fits max_component_utf16 units.
-    std::string fit_component(const std::string &name) {
+    std::string fit_component(const std::string &name, std::size_t limit = max_component_utf16) {
       const auto total = utf16_len(name);
-      if (total <= max_component_utf16) {
+      if (total <= limit) {
         return name;
       }
       const auto dot = name.rfind('.');
-      const bool has_ext = dot != std::string::npos && dot > 0 && utf16_len(name.substr(dot)) < max_component_utf16;
+      const bool has_ext = dot != std::string::npos && dot > 0 && utf16_len(name.substr(dot)) < limit;
       const auto ext = has_ext ? name.substr(dot) : std::string();
       const auto stem = has_ext ? name.substr(0, dot) : name;
-      return truncate_utf16(stem, max_component_utf16 - utf16_len(ext)) + ext;
+      return truncate_utf16(stem, limit - utf16_len(ext)) + ext;
     }
 
     struct reader {
@@ -255,9 +261,15 @@ namespace clipboard::files {
           s.push_back(ch);
         }
       }
-      while (!s.empty() && (s.back() == '.' || s.back() == ' ')) {
-        s.pop_back();
-      }
+      const auto trim = [&s]() {
+        while (!s.empty() && (s.back() == '.' || s.back() == ' ')) {
+          s.pop_back();
+        }
+      };
+      trim();
+      // Truncate first (leaving room for a possible reserved-name "_"), then apply the reserved rule.
+      s = fit_component(s, max_component_utf16 - 1);
+      trim();
       if (s.empty()) {
         return "_";
       }
@@ -266,7 +278,7 @@ namespace clipboard::files {
       if (is_reserved_base(base)) {
         s.insert(base.size(), "_");
       }
-      return fit_component(s);
+      return s;
     }
   }  // namespace
 
