@@ -6,6 +6,7 @@
 #include "src/clipboard/files/manifest.h"
 
 #include <fstream>
+#include <map>
 #include <sstream>
 
 using namespace clipboard::files;
