@@ -278,16 +278,13 @@ namespace clipboard_agent {
         }
       }
 
-      /// Spawns min(4, ceil(remaining / 4 MiB)) workers once (caller holds m_; the workers block on m_ until it is released).
+      /// Tops the pool up to min(4, ceil(remaining / 4 MiB)) workers (caller holds m_; new workers block on m_ until it is released).
+      /// Called on every Read that needs remote data, so a Read at EOF followed by Seek back still gets workers.
       void start_workers_locked() {
-        if (workers_started_) {
-          return;
-        }
-        workers_started_ = true;
-        const std::uint64_t remaining = size_ - std::min(size_, next_fetch_);
+        const std::uint64_t remaining = size_ - std::min(size_, pos_);
         const std::uint64_t pieces = (remaining + k_piece_bytes - 1) / k_piece_bytes;
-        const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(k_max_pieces, pieces));
-        for (std::size_t i = 0; i < n; ++i) {
+        const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(k_max_pieces, pieces));
+        while (workers_.size() < want) {
           workers_.emplace_back([this] {
             worker_loop();
           });
@@ -400,7 +397,6 @@ namespace clipboard_agent {
       std::uint64_t next_fetch_ {0};
       std::uint64_t gen_ {0};
       bool stop_ {false};
-      bool workers_started_ {false};
 
       // disk mode
       HANDLE file_ {INVALID_HANDLE_VALUE};

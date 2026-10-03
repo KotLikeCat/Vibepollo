@@ -844,6 +844,27 @@ TEST_F(ClipboardAgent, RemoteStreamsStartWorkersLazilyAndSparingly) {
   EXPECT_LE(src->max_current.load(), 2);
 }
 
+TEST_F(ClipboardAgent, ReadAtEofThenSeekBackStillGetsData) {
+  cf::manifest m;
+  m.offer_id = {10};
+  m.entries.push_back({cf::entry_kind::file, 100, 0, "a.bin"});
+  auto src = std::make_shared<fake_source>();
+  obj_ptr obj(create_data_object(make_offer(m, false), src, unique_temp_root("eof")));
+  auto f = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 0);
+  release_medium sm;
+  ASSERT_EQ(obj->GetData(&f, &sm.m), S_OK);
+  LARGE_INTEGER mv;
+  mv.QuadPart = 100;
+  ASSERT_EQ(sm.m.pstm->Seek(mv, STREAM_SEEK_SET, nullptr), S_OK);
+  char c[8];
+  ULONG n = 1;
+  ASSERT_EQ(sm.m.pstm->Read(c, sizeof(c), &n), S_OK);
+  EXPECT_EQ(n, 0u);  // at EOF: nothing to fetch
+  mv.QuadPart = 0;
+  ASSERT_EQ(sm.m.pstm->Seek(mv, STREAM_SEEK_SET, nullptr), S_OK);
+  EXPECT_EQ(read_all(sm.m.pstm, 100), expected_bytes(0, 0, 100));
+}
+
 TEST_F(ClipboardAgent, PipelinedReadsOfLargeFile) {
   cf::manifest m;
   m.offer_id = id_of(5);
