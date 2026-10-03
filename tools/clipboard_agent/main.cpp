@@ -4,6 +4,9 @@
  *        Launched by sunshine.exe as the logged-on user (`sunshine_clipboard_agent.exe <pipe guid>`).
  * @note Never writes to stdout/stderr; logging is disabled.
  */
+// winsock2.h must precede windows.h (pulled in by the project headers below)
+#include <winsock2.h>
+
 #include "data_object.h"
 #include "pipe_range_source.h"
 #include "prefetch.h"

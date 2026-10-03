@@ -102,9 +102,9 @@ namespace {
     }
   };
 
-  FORMATETC fmt_of(const wchar_t *name, DWORD tymed, LONG lindex = -1) {
+  FORMATETC fmt_of(const char *name, DWORD tymed, LONG lindex = -1) {
     FORMATETC f {};
-    f.cfFormat = static_cast<CLIPFORMAT>(RegisterClipboardFormatW(name));
+    f.cfFormat = static_cast<CLIPFORMAT>(RegisterClipboardFormatA(name));
     f.dwAspect = DVASPECT_CONTENT;
     f.lindex = lindex;
     f.tymed = tymed;
@@ -206,7 +206,7 @@ TEST_F(ClipboardAgent, DescriptorListsEntries) {
 
   FORMATETC hdrop {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
   EXPECT_EQ(obj->QueryGetData(&hdrop), DV_E_FORMATETC);
-  auto unknown = fmt_of(L"Vibepollo.Test.Unknown", TYMED_HGLOBAL);
+  auto unknown = fmt_of("Vibepollo.Test.Unknown", TYMED_HGLOBAL);
   EXPECT_EQ(obj->QueryGetData(&unknown), DV_E_FORMATETC);
 
   IEnumFORMATETC *en = nullptr;

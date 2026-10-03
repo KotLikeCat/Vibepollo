@@ -70,14 +70,14 @@ namespace clipboard_agent {
   }
 
   fs::path prefetcher::path_for(std::size_t index) const {
-    return extended_path(dir_ / fs::path(platf::from_utf8(windows_paths_.at(index))));
+    return extended_path(dir_ / fs::path(utf_utils::from_utf8(windows_paths_.at(index))));
   }
 
   std::vector<fs::path> prefetcher::top_level_paths() const {
     std::vector<fs::path> out;
     for (std::size_t i = 0; i < windows_paths_.size(); ++i) {
       if (windows_paths_[i].find('\\') == std::string::npos) {
-        out.push_back(fs::absolute(dir_ / fs::path(platf::from_utf8(windows_paths_[i]))).make_preferred());
+        out.push_back(fs::absolute(dir_ / fs::path(utf_utils::from_utf8(windows_paths_[i]))).make_preferred());
       }
     }
     return out;

@@ -31,17 +31,17 @@ namespace clipboard_agent {
 
     const format_ids &ids() {
       static const format_ids f {
-        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW)),
-        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILECONTENTS)),
-        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
-        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PERFORMEDDROPEFFECT)),
-        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PASTESUCCEEDED)),
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatA(CFSTR_FILEDESCRIPTORW)),
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatA(CFSTR_FILECONTENTS)),
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatA(CFSTR_PREFERREDDROPEFFECT)),
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatA(CFSTR_PERFORMEDDROPEFFECT)),
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatA(CFSTR_PASTESUCCEEDED)),
       };
       return f;
     }
 
     bool fits_descriptor(const std::string &utf8_path) {
-      return platf::from_utf8(utf8_path).size() <= k_max_descriptor_name;
+      return utf_utils::from_utf8(utf8_path).size() <= k_max_descriptor_name;
     }
 
     FORMATETC make_fmt(CLIPFORMAT cf, DWORD tymed) {
@@ -259,7 +259,7 @@ namespace clipboard_agent {
           const std::uint64_t size = e.kind == entry_kind::directory ? 0 : e.size;
           d.nFileSizeHigh = static_cast<DWORD>(size >> 32);
           d.nFileSizeLow = static_cast<DWORD>(size & 0xFFFFFFFFu);
-          const auto name = platf::from_utf8(o_.windows_paths[desc_to_entry_[i]]);
+          const auto name = utf_utils::from_utf8(o_.windows_paths[desc_to_entry_[i]]);
           std::memcpy(d.cFileName, name.c_str(), (name.size() + 1) * sizeof(wchar_t));
           std::memcpy(buf.data() + offsetof(FILEGROUPDESCRIPTORW, fgd) + i * sizeof(FILEDESCRIPTORW), &d, sizeof(d));
         }
@@ -274,7 +274,7 @@ namespace clipboard_agent {
         const auto &en = o_.entries[*e];
         const auto &path = o_.windows_paths[*e];
         const auto slash = path.rfind('\\');
-        const auto leaf = platf::from_utf8(slash == std::string::npos ? path : path.substr(slash + 1));
+        const auto leaf = utf_utils::from_utf8(slash == std::string::npos ? path : path.substr(slash + 1));
         IStream *s = nullptr;
         if (pf_ && pf_->current() == prefetcher::state::done) {
           s = create_disk_stream(pf_->path_for(*e), en.size, leaf, en.mtime_ms);
