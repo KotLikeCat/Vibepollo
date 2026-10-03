@@ -51,6 +51,7 @@ Payload: `u8 version = 1`, `u8 offer_id[16]`, `u32 request_id`, `u32 file_index`
 - Connection reuse: chunk POSTs must reuse kept-alive TLS connections (no handshake per chunk). The client uses one `NvHTTP`/`QNetworkAccessManager` per fileserver worker and verifies keep-alive is honoured by the host's HTTPS server (add a test or a log counter of new TLS sessions during a transfer).
 - No blocking on the HTTPS io thread: the chunk handler validates, moves the body to the transfer layer and replies immediately; pipe writes happen on another thread.
 - Copies are acceptable (GB/s memcpy) but avoid per-byte processing.
+- Minimum supported Mac uplink: about 3 Mbps. Timeouts are progress-aware (host: 15 s per request counted from the later of its issue and the last completed chunk; agent: 60 s without any `range_data` frame; client: inactivity-based POST timeout), so a slower link only slows a paste; below ~3 Mbps (4 × 4 MiB = 16 MiB = ~134 Mbit within 60 s without progress, plus overhead) a single chunk can still stall past a timeout and fail the paste.
 - Mac → host traffic flows opposite to the video stream on full-duplex links, so no rate cap is needed here (host → Mac will need one).
 
 ## Host components (Vibepollo)

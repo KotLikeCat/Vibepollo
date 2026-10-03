@@ -116,6 +116,7 @@ namespace clipboard::files {
     std::unique_lock lock(mutex_);
     fail_all_locked(read_error::gone);
     offer_ = m;
+    last_progress_.reset();
     drain(lock);
   }
 
@@ -123,17 +124,21 @@ namespace clipboard::files {
     std::unique_lock lock(mutex_);
     fail_all_locked(read_error::gone);
     offer_.reset();
+    last_progress_.reset();
     drain(lock);
   }
 
-  bool transfer::start_read(std::uint32_t read_id, std::uint32_t file_index, std::uint64_t offset, std::uint64_t length) {
+  start_result transfer::start_read(const offer_id_t &offer, std::uint32_t read_id, std::uint32_t file_index, std::uint64_t offset, std::uint64_t length) {
     std::unique_lock lock(mutex_);
-    if (!offer_ || file_index >= offer_->entries.size() || reads_.count(read_id)) {
-      return false;
+    if (!offer_ || offer_->offer_id != offer) {
+      return start_result::gone;
+    }
+    if (file_index >= offer_->entries.size() || reads_.count(read_id)) {
+      return start_result::invalid;
     }
     const auto &e = offer_->entries[file_index];
     if (e.kind != entry_kind::file || offset > e.size || length > e.size - offset) {
-      return false;
+      return start_result::invalid;
     }
     if (length == 0) {
       events_.push_back([this, read_id] {
@@ -152,7 +157,7 @@ namespace clipboard::files {
       pump_locked();
     }
     drain(lock);
-    return true;
+    return start_result::ok;
   }
 
   void transfer::cancel_read(std::uint32_t read_id) {
@@ -185,6 +190,7 @@ namespace clipboard::files {
       return true;
     }
     // The slot stays held (in-flight -> buffered) until the chunk is handed to deliver.
+    last_progress_ = last_tick_;
     requests_.erase(rit);
     rs.buffered.emplace(req.offset, std::move(data));
     while (true) {
@@ -238,7 +244,7 @@ namespace clipboard::files {
     for (auto &[id, r] : requests_) {
       if (!r.issued) {
         r.issued = now;
-      } else if (now - *r.issued >= opt_.timeout) {
+      } else if (now - (last_progress_ ? std::max(*r.issued, *last_progress_) : *r.issued) >= opt_.timeout) {
         expired.push_back(id);
       }
     }

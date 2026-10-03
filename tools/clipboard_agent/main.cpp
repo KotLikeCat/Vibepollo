@@ -49,12 +49,21 @@ namespace {
   IDataObject *g_object = nullptr;
   offer_id_t g_object_id {};
 
+  std::atomic<bool> g_exiting {false};  // set once the message loop has ended (orderly shutdown)
+
+  /// A failed or timed-out send may have left a partial frame on the pipe, which desynchronizes the host's framing and
+  /// could deliver wrong bytes. The run ends at once; the host notices the dead process, clears the offer and restarts us.
+  /// (TerminateProcess instead of a quit message: the STA may be blocked inside a GetData wait and not pumping.)
   bool send_frame(const std::string &frame) {
-    std::lock_guard lock(g_send_mutex);
-    if (!g_pipe) {
-      return false;
+    bool ok;
+    {
+      std::lock_guard lock(g_send_mutex);
+      ok = g_pipe && g_pipe->send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(frame.data()), frame.size()), 5000);
     }
-    return g_pipe->send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(frame.data()), frame.size()), 5000);
+    if (!ok && !g_exiting.load()) {
+      TerminateProcess(GetCurrentProcess(), 6);
+    }
+    return ok;
   }
 
   std::filesystem::path default_prefetch_root() {
@@ -183,6 +192,12 @@ namespace {
     }
     auto *o = new clipboard_agent::offer {id, std::move(decoded.value.entries), {}, prefetch};
     o->windows_paths = clipboard::files::sanitize_for_windows(o->entries);
+    if (!clipboard_agent::offer_fits_descriptors(*o)) {
+      // The host rejects such offers (windows_path_too_long); never paste a silently incomplete tree.
+      delete o;
+      send_frame(agent::encode_offer_dropped(id));
+      return;
+    }
     if (!PostMessageW(g_hwnd, WM_APP_SET_OFFER, 0, reinterpret_cast<LPARAM>(o))) {
       delete o;
     }
@@ -283,6 +298,7 @@ int main(int argc, char **argv) {
     DispatchMessageW(&msg);
   }
 
+  g_exiting = true;
   // Shutting down: drop our offer from the clipboard if it is still ours.
   g_source->shutdown();  // no further cancel_read sends; blocked reads return
   {

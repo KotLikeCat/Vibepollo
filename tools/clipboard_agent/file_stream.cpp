@@ -49,18 +49,18 @@ namespace clipboard_agent {
         src_ = std::move(src);
         index_ = index;
         token_ = std::make_shared<cancel_token>();
-        for (std::size_t i = 0; i < k_max_pieces; ++i) {
-          workers_.emplace_back([this] {
-            worker_loop();
-          });
-        }
+        // Workers start lazily on the first Read (see start_workers_locked): apps may open many streams up front.
       }
 
       void init_disk(const std::filesystem::path &path) {
-        file_.open(path, std::ios::binary);
+        // FILE_SHARE_DELETE: the prefetch cleanup (or a user delete) must not be blocked by an open stream.
+        file_ = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       }
 
       ~stream_impl() {
+        if (file_ != INVALID_HANDLE_VALUE) {
+          CloseHandle(file_);
+        }
         if (!workers_.empty()) {
           std::shared_ptr<cancel_token> tok;
           {
@@ -252,18 +252,17 @@ namespace clipboard_agent {
         if (pos_ >= size_ || cb == 0) {
           return S_OK;
         }
-        if (!file_) {
+        if (file_ == INVALID_HANDLE_VALUE) {
           return STG_E_READFAULT;
         }
-        file_.clear();
-        file_.seekg(static_cast<std::streamoff>(pos_));
-        const auto want = static_cast<std::streamsize>(std::min<std::uint64_t>(cb, size_ - pos_));
-        file_.read(dst, want);
-        const auto n = file_.gcount();
-        if (n <= 0) {
+        LARGE_INTEGER at;
+        at.QuadPart = static_cast<LONGLONG>(pos_);
+        const auto want = static_cast<DWORD>(std::min<std::uint64_t>(cb, size_ - pos_));
+        DWORD n = 0;
+        if (!SetFilePointerEx(file_, at, nullptr, FILE_BEGIN) || !ReadFile(file_, dst, want, &n, nullptr) || n == 0) {
           return STG_E_READFAULT;
         }
-        got = static_cast<ULONG>(n);
+        got = n;
         pos_ += got;
         return S_OK;
       }
@@ -279,8 +278,27 @@ namespace clipboard_agent {
         }
       }
 
+      /// Spawns min(4, ceil(remaining / 4 MiB)) workers once (caller holds m_; the workers block on m_ until it is released).
+      void start_workers_locked() {
+        if (workers_started_) {
+          return;
+        }
+        workers_started_ = true;
+        const std::uint64_t remaining = size_ - std::min(size_, next_fetch_);
+        const std::uint64_t pieces = (remaining + k_piece_bytes - 1) / k_piece_bytes;
+        const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(k_max_pieces, pieces));
+        for (std::size_t i = 0; i < n; ++i) {
+          workers_.emplace_back([this] {
+            worker_loop();
+          });
+        }
+      }
+
       HRESULT read_remote(char *dst, ULONG cb, ULONG &got) {
         std::unique_lock lock(m_);
+        if (cb != 0) {
+          start_workers_locked();
+        }
         while (got < cb && pos_ < size_) {
           drop_consumed();
           auto it = pieces_.upper_bound(pos_);
@@ -382,9 +400,10 @@ namespace clipboard_agent {
       std::uint64_t next_fetch_ {0};
       std::uint64_t gen_ {0};
       bool stop_ {false};
+      bool workers_started_ {false};
 
       // disk mode
-      std::ifstream file_;
+      HANDLE file_ {INVALID_HANDLE_VALUE};
     };
 
     /// Process-lifetime MTA thread that hosts the streams, so IStream calls from other processes arrive on RPC
@@ -485,19 +504,34 @@ namespace clipboard_agent {
     IStream *marshaled = nullptr;  // CoMarshalInterThreadInterfaceInStream result (an IStream holding the marshal data)
     IStream *direct = nullptr;
     mta_host *h = host();
+    bool failed = false;
     const bool ran = h != nullptr && h->run_sync([&] {
-      IStream *raw = create();
-      if (raw == nullptr) {
-        return;
-      }
-      if (SUCCEEDED(CoMarshalInterThreadInterfaceInStream(IID_IStream, raw, &marshaled))) {
-        raw->Release();  // the marshal stub now owns the object
-      } else {
-        direct = raw;
+      try {
+        IStream *raw = create();
+        if (raw == nullptr) {
+          return;
+        }
+        if (SUCCEEDED(CoMarshalInterThreadInterfaceInStream(IID_IStream, raw, &marshaled))) {
+          raw->Release();  // the marshal stub now owns the object
+        } else {
+          direct = raw;
+        }
+      } catch (...) {
+        failed = true;  // an exception must never unwind out of the MTA thread (std::terminate)
       }
     });
     if (!ran) {
       return create();  // host already shut down: plain object on the caller's thread
+    }
+    if (failed) {
+      if (direct != nullptr) {
+        direct->Release();
+      }
+      if (marshaled != nullptr) {
+        CoReleaseMarshalData(marshaled);
+        marshaled->Release();
+      }
+      return nullptr;
     }
     if (direct != nullptr) {
       return direct;
@@ -506,9 +540,18 @@ namespace clipboard_agent {
       return nullptr;
     }
     IStream *proxy = nullptr;
-    if (FAILED(CoGetInterfaceAndReleaseStream(marshaled, IID_IStream, reinterpret_cast<void **>(&proxy)))) {
+    // CoGetInterfaceAndReleaseStream releases the stream but, on a failed unmarshal, NOT the marshal data it holds
+    // (the stub would leak): release that explicitly. Rewind first, as CoReleaseMarshalData reads from the start.
+    marshaled->AddRef();
+    const HRESULT hr = CoGetInterfaceAndReleaseStream(marshaled, IID_IStream, reinterpret_cast<void **>(&proxy));
+    if (FAILED(hr)) {
+      LARGE_INTEGER zero {};
+      marshaled->Seek(zero, STREAM_SEEK_SET, nullptr);
+      CoReleaseMarshalData(marshaled);
+      marshaled->Release();
       return nullptr;
     }
+    marshaled->Release();
     return proxy;
   }
 

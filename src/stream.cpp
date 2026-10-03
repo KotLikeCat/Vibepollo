@@ -3521,6 +3521,10 @@ namespace stream {
       session.clipboard_file_requests.pending.push_back(req);
     }
 
+    bool control_encrypted(const session_t &session) {
+      return session.config.controlProtocolType == 13;
+    }
+
     crypto::PERM permission(session_t &session) {
       // update_device_info() writes session.permission without any lock; mirror that (no lock here either).
       return session.permission;

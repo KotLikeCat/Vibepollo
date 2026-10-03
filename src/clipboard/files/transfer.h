@@ -43,8 +43,15 @@ namespace clipboard::files {
   struct transfer_options {
     std::uint32_t chunk_bytes = 4u << 20;
     std::size_t max_outstanding = 4;
-    std::chrono::milliseconds timeout {15000};
+    std::chrono::milliseconds timeout {15000};  ///< without progress, see tick()
     int retries = 1;
+  };
+
+  /// Result of transfer::start_read.
+  enum class start_result {
+    ok,
+    gone,  ///< no offer, or the offer id is not the current one (superseded)
+    invalid,  ///< bad file index / range / duplicate read id
   };
 
   class transfer {
@@ -61,13 +68,16 @@ namespace clipboard::files {
     void set_offer(const manifest &m);
     /// Drops the offer; pending reads fail with gone.
     void clear_offer();
-    /// False if no offer / bad index / duplicate read id / range beyond size.
-    bool start_read(std::uint32_t read_id, std::uint32_t file_index, std::uint64_t offset, std::uint64_t length);
+    /// `offer` is checked against the current offer under the scheduler mutex, so a read from a superseded data
+    /// object can never be started against a newer offer (gone). invalid = bad index / duplicate id / range beyond size.
+    start_result start_read(const offer_id_t &offer, std::uint32_t read_id, std::uint32_t file_index, std::uint64_t offset, std::uint64_t length);
     void cancel_read(std::uint32_t read_id);
     /// False means the chunk is unknown or late (HTTP 410).
     bool on_chunk(const offer_id_t &offer, std::uint32_t request_id, std::uint32_t file_index, std::uint64_t offset, std::string data);
     bool on_chunk_error(const offer_id_t &offer, std::uint32_t request_id, read_error err);
-    /// Timeouts and retries. Requests issued before the first tick are timed from the first tick that sees them.
+    /// Timeouts and retries. A request times out `timeout` after max(its issue time, the last chunk completion on
+    /// the offer), so a slow link with progress on other chunks is not failed. Requests issued before the first tick
+    /// are timed from the first tick that sees them.
     void tick(std::chrono::steady_clock::time_point now);
     std::optional<offer_id_t> current_offer() const;
 
@@ -108,6 +118,7 @@ namespace clipboard::files {
     std::uint32_t next_request_id_ = 1;
     std::size_t outstanding_ = 0;
     std::optional<clock::time_point> last_tick_;
+    std::optional<clock::time_point> last_progress_;  ///< last accepted chunk (stamped with last_tick_); reset with the offer
     std::deque<std::function<void()>> events_;
     bool dispatching_ = false;
   };

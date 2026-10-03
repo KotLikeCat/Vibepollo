@@ -174,6 +174,19 @@ namespace clipboard_agent {
     }
   }
 
+  /// Gives every prefetched file / folder its Mac modification time (Explorer copies CF_HDROP files with their mtime).
+  void prefetcher::apply_mtimes() {
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+      const FILETIME ft = filetime_from_unix_ms(entries_[i].mtime_ms);
+      HANDLE h = CreateFileW(path_for(i).c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+      if (h == INVALID_HANDLE_VALUE) {
+        continue;  // cosmetic only
+      }
+      SetFileTime(h, nullptr, nullptr, &ft);
+      CloseHandle(h);
+    }
+  }
+
   void prefetcher::run() {
     std::error_code ec;
     fs::create_directories(extended_path(dir_), ec);
@@ -189,6 +202,9 @@ namespace clipboard_agent {
       }
       for (auto &t : pool) {
         t.join();
+      }
+      if (!failed_.load()) {
+        apply_mtimes();  // after the last piece of every file is written
       }
     }
     {

@@ -20,6 +20,7 @@ namespace clipboard_agent {
     /// `send` writes one complete frame to the pipe (thread-safe); returns false when the pipe is gone.
     using sender = std::function<bool(const std::string &frame)>;
 
+    /// `read_timeout` is the longest a read waits without ANY range_data frame arriving (it restarts on every frame).
     explicit pipe_range_source(sender send, std::chrono::milliseconds read_timeout = std::chrono::seconds(60));
 
     /// A range_source whose every read_range frame carries `offer` (never a global "current offer").
@@ -48,5 +49,6 @@ namespace clipboard_agent {
     std::map<std::uint32_t, pending> pending_;
     std::uint32_t next_id_ {0};
     bool dead_ {false};
+    std::chrono::steady_clock::time_point last_progress_ {};  ///< last range_data frame received (any read)
   };
 }  // namespace clipboard_agent

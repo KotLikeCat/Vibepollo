@@ -330,6 +330,10 @@ namespace clipboard_agent {
     return new data_object(std::move(o), std::move(src), std::move(prefetch_root));
   }
 
+  bool offer_fits_descriptors(const offer &o) {
+    return descriptor_omitted_count(o) == 0;
+  }
+
   std::size_t descriptor_omitted_count(const offer &o) {
     std::size_t n = 0;
     for (const auto &p : o.windows_paths) {

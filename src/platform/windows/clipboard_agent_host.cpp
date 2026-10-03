@@ -255,8 +255,12 @@ namespace platf::clipboard_agent {
             g_queue.pop_front();
             g_queued_bytes -= frame.size();
           }
-          pipe.send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(frame.data()), frame.size()));
-          if (!pipe.is_connected()) {
+          // A failed or timed-out write may have left a partial frame on the wire, which would desynchronize the
+          // agent's framing: the run ends (agent restarts, on_connection_changed(false) clears the offer).
+          if (!pipe.try_send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(frame.data()), frame.size()))) {
+            BOOST_LOG(warning) << "Clipboard agent: pipe send failed; restarting the agent"sv;
+            broken = true;
+          } else if (!pipe.is_connected()) {
             broken = true;
           }
         }
@@ -264,7 +268,10 @@ namespace platf::clipboard_agent {
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_ping) {
           const auto ping = agent::encode_ping(++nonce);
-          pipe.send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(ping.data()), ping.size()));
+          if (!pipe.try_send(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(ping.data()), ping.size()))) {
+            BOOST_LOG(warning) << "Clipboard agent: pipe send failed; restarting the agent"sv;
+            broken = true;
+          }
           next_ping = now + kPingInterval;
         }
 

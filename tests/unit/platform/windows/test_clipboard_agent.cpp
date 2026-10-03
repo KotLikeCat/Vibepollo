@@ -70,7 +70,8 @@ namespace {
     std::atomic<int> calls {0};
     std::atomic<int> current {0};
     std::atomic<int> max_current {0};
-    int delay_ms {0};
+    std::atomic<int> delay_ms {0};
+    std::atomic<std::uint64_t> delay_from_offset {0};  ///< only reads at or beyond this offset are delayed
     std::optional<cf::read_error> fail;
 
   private:
@@ -86,7 +87,8 @@ namespace {
           --c;
         }
       } guard {current};
-      for (int waited = 0; waited < delay_ms; waited += 5) {
+      const int delay = off >= delay_from_offset.load() ? delay_ms.load() : 0;
+      for (int waited = 0; waited < delay; waited += 5) {
         if (token && token->cancelled()) {
           return {false, cf::read_error::io};
         }
@@ -350,12 +352,21 @@ TEST_F(ClipboardAgent, ErrorBecomesReadFault) {
 }
 
 TEST_F(ClipboardAgent, StreamReleasedMidReadDoesNotHang) {
+  // 20 MiB = 5 pieces: reading past the first piece frees a slot, a worker then blocks in the (delayed) fifth read.
+  cf::manifest m;
+  m.offer_id = {4};
+  m.entries.push_back({cf::entry_kind::file, 20u << 20, 0, "big.bin"});
   auto src = std::make_shared<fake_source>();
   src->delay_ms = 5000;  // the fake honours the cancel token: releasing must abort the read, not wait it out
-  obj_ptr obj(create_data_object(cyrillic_offer(false), src, unique_temp_root("rel")));
-  auto f = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 1);
+  src->delay_from_offset = 16u << 20;
+  obj_ptr obj(create_data_object(make_offer(m, false), src, unique_temp_root("rel")));
+  auto f = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 0);
   STGMEDIUM med {};
   ASSERT_EQ(obj->GetData(&f, &med), S_OK);
+  std::string buf((4u << 20) + 1, '\0');
+  ULONG got = 0;
+  ASSERT_EQ(med.pstm->Read(buf.data(), static_cast<ULONG>(buf.size()), &got), S_OK);
+  ASSERT_EQ(got, buf.size());
   const auto wait_start = std::chrono::steady_clock::now();
   while (src->current.load() == 0 && std::chrono::steady_clock::now() - wait_start < std::chrono::seconds(3)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -429,7 +440,7 @@ TEST_F(ClipboardAgent, PrefetchFailureFailsHdrop) {
   EXPECT_EQ(obj->GetData(&hdrop, &med), E_FAIL);
 }
 
-TEST_F(ClipboardAgent, OverlongPathsAreLeftOutOfDescriptor) {
+TEST_F(ClipboardAgent, OverlongPathsMakeTheOfferUnfit) {
   cf::manifest m;
   m.offer_id = {1};
   m.entries.push_back({cf::entry_kind::file, 3, 0, "short.txt"});
@@ -441,6 +452,8 @@ TEST_F(ClipboardAgent, OverlongPathsAreLeftOutOfDescriptor) {
   m.entries.push_back({cf::entry_kind::file, 3, 0, "tail.txt"});
   const auto o = make_offer(m, false);
   EXPECT_EQ(descriptor_omitted_count(o), 1u);
+  EXPECT_FALSE(offer_fits_descriptors(o));  // main.cpp drops such an offer entirely (offer_dropped)
+  // Defensive path only: should one slip through, create_data_object still leaves the entry out.
   auto src = std::make_shared<fake_source>();
   obj_ptr obj(create_data_object(o, src, unique_temp_root("long")));
   const auto names = descriptor_names(obj.p);
@@ -599,6 +612,29 @@ TEST_F(ClipboardAgent, PipeRangeSourceTimeoutShortLastAndOverflow) {
   }
 }
 
+TEST_F(ClipboardAgent, PipeRangeSourceTimeoutRestartsOnAnyRangeData) {
+  loop_router lr(std::chrono::milliseconds(250));
+  lr.responder = [](const ag::read_range_t &) {};  // the read itself is never answered
+  std::atomic<bool> stop {false};
+  std::thread feeder([&] {
+    // Frames for other reads keep arriving every 100 ms for 800 ms: the 250 ms timeout must keep restarting.
+    for (int i = 0; i < 8 && !stop.load(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      lr.ps->on_range_data({4242, false, "x"});
+    }
+  });
+  std::string out;
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto rr = lr.ps->bind(id_of(1))->read(0, 0, 10, out);
+  const auto took = std::chrono::steady_clock::now() - t0;
+  stop = true;
+  feeder.join();
+  EXPECT_FALSE(rr.ok);
+  EXPECT_EQ(rr.error, cf::read_error::timeout);
+  EXPECT_GE(took, std::chrono::milliseconds(800));  // would be ~250 ms without progress awareness
+  EXPECT_LT(took, std::chrono::seconds(5));
+}
+
 TEST_F(ClipboardAgent, ReadsKeepTheirOwnOfferId) {
   loop_router lr;
   const std::uint64_t big = 20u << 20;  // > 16 MiB window: later pieces are requested only after consumption
@@ -725,6 +761,87 @@ TEST_F(ClipboardAgent, ShellCopiesFolderTree) {
     std::error_code ec;
     fs::remove_all(dest, ec);
   }
+}
+
+TEST_F(ClipboardAgent, PrefetchedFilesKeepTheirMtime) {
+  cf::manifest m;
+  m.offer_id = id_of(7);
+  m.entries.push_back({cf::entry_kind::directory, 0, 1600000000000, "dir"});
+  m.entries.push_back({cf::entry_kind::file, 100, 1700000000000, "dir/a.bin"});
+  m.entries.push_back({cf::entry_kind::file, 0, 1650000000000, "empty.bin"});
+  auto src = std::make_shared<fake_source>();
+  obj_ptr obj(create_data_object(make_offer(m, true), src, unique_temp_root("mtime")));
+  FORMATETC hdrop {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+  release_medium med;
+  ASSERT_EQ(obj->GetData(&hdrop, &med.m), S_OK);
+  auto *df = static_cast<DROPFILES *>(GlobalLock(med.m.hGlobal));
+  ASSERT_NE(df, nullptr);
+  std::vector<std::wstring> paths;
+  for (const wchar_t *p = reinterpret_cast<const wchar_t *>(reinterpret_cast<const char *>(df) + df->pFiles); *p; p += wcslen(p) + 1) {
+    paths.emplace_back(p);
+  }
+  GlobalUnlock(med.m.hGlobal);
+  ASSERT_EQ(paths.size(), 2u);  // dir, empty.bin
+  auto write_time = [](const fs::path &p) {
+    HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    FILETIME ft {};
+    if (h != INVALID_HANDLE_VALUE) {
+      GetFileTime(h, nullptr, nullptr, &ft);
+      CloseHandle(h);
+    }
+    return (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+  };
+  auto want = [](std::int64_t ms) {
+    const auto ft = filetime_from_unix_ms(ms);
+    return (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+  };
+  EXPECT_EQ(write_time(paths[0]), want(1600000000000));
+  EXPECT_EQ(write_time(fs::path(paths[0]) / L"a.bin"), want(1700000000000));
+  EXPECT_EQ(write_time(paths[1]), want(1650000000000));
+}
+
+TEST_F(ClipboardAgent, DiskStreamDoesNotBlockDeletion) {
+  cf::manifest m;
+  m.offer_id = id_of(8);
+  m.entries.push_back({cf::entry_kind::file, 100, 0, "a.bin"});
+  auto src = std::make_shared<fake_source>();
+  obj_ptr obj(create_data_object(make_offer(m, true), src, unique_temp_root("del")));
+  FORMATETC hdrop {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+  release_medium med;
+  ASSERT_EQ(obj->GetData(&hdrop, &med.m), S_OK);  // waits for the prefetch
+  auto *df = static_cast<DROPFILES *>(GlobalLock(med.m.hGlobal));
+  ASSERT_NE(df, nullptr);
+  const std::wstring file = reinterpret_cast<const wchar_t *>(reinterpret_cast<const char *>(df) + df->pFiles);
+  GlobalUnlock(med.m.hGlobal);
+  auto f = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 0);
+  release_medium sm;
+  ASSERT_EQ(obj->GetData(&f, &sm.m), S_OK);
+  char c;
+  ULONG n = 0;
+  ASSERT_EQ(sm.m.pstm->Read(&c, 1, &n), S_OK);  // the disk stream now holds the file open
+  EXPECT_TRUE(DeleteFileW(file.c_str())) << GetLastError();
+}
+
+TEST_F(ClipboardAgent, RemoteStreamsStartWorkersLazilyAndSparingly) {
+  cf::manifest m;
+  m.offer_id = id_of(9);
+  m.entries.push_back({cf::entry_kind::file, 100, 0, "small.bin"});
+  m.entries.push_back({cf::entry_kind::file, 5u << 20, 0, "mid.bin"});  // 2 pieces
+  auto src = std::make_shared<fake_source>();
+  src->delay_ms = 40;
+  obj_ptr obj(create_data_object(make_offer(m, false), src, unique_temp_root("lazy")));
+  auto f0 = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 0);
+  auto f1 = fmt_of(CFSTR_FILECONTENTS, TYMED_ISTREAM, 1);
+  release_medium s0, s1;
+  ASSERT_EQ(obj->GetData(&f0, &s0.m), S_OK);
+  ASSERT_EQ(obj->GetData(&f1, &s1.m), S_OK);
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  EXPECT_EQ(src->calls.load(), 0) << "no fetching before the first Read";
+  EXPECT_EQ(read_all(s0.m.pstm, 100), expected_bytes(0, 0, 100));
+  EXPECT_EQ(src->calls.load(), 1);  // one piece, one worker
+  EXPECT_EQ(read_all(s1.m.pstm, 65536), expected_bytes(1, 0, 5u << 20));
+  EXPECT_EQ(src->calls.load(), 3);
+  EXPECT_LE(src->max_current.load(), 2);
 }
 
 TEST_F(ClipboardAgent, PipelinedReadsOfLargeFile) {

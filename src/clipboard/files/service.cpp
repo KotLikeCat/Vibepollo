@@ -48,6 +48,14 @@ namespace clipboard::files::service {
     }
 
     std::atomic<bool> g_active {false};
+    /// steady_clock ticks of the last moment a read was in flight (0 = never). Keeps active() true for a short linger
+    /// after the last read ends so the control loop does not fall back to its slow iterate between files / refills.
+    std::atomic<std::chrono::steady_clock::rep> g_last_active {0};
+    constexpr auto k_active_linger = std::chrono::seconds(2);
+
+    void stamp_active() {
+      g_last_active.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
+    }
 
     void read_started(std::uint32_t id) {
       std::lock_guard lock {st().mutex};
@@ -55,19 +63,22 @@ namespace clipboard::files::service {
       g_active.store(true, std::memory_order_release);
     }
 
-    void read_finished(std::uint32_t id) {
+    /// `served` = the read really ran (not rejected up front): only those arm the linger.
+    void read_finished(std::uint32_t id, bool served = true) {
       std::lock_guard lock {st().mutex};
       st().active_reads.erase(id);
+      if (served) {
+        stamp_active();  // before g_active drops, so a reader that sees "idle" also sees the stamp
+      }
       g_active.store(!st().active_reads.empty(), std::memory_order_release);
     }
 
     transfer::callbacks make_callbacks();
 
-    void ensure_transfer(transfer_options opt = {}) {
-      auto &s = st();
-      if (!s.tr) {
-        s.tr = std::make_unique<transfer>(make_callbacks(), opt);
-      }
+    /// The transfer is created once (configure() / set_test_hooks()) and never replaced while running.
+    transfer *tr() {
+      std::lock_guard lock {st().mutex};
+      return st().tr.get();
     }
 
     bool send_frame(const std::string &frame) {
@@ -98,7 +109,9 @@ namespace clipboard::files::service {
       }
       read_finished(read_id);
       send_error(read_id, e);
-      st().tr->cancel_read(read_id);
+      if (auto *t = tr()) {
+        t->cancel_read(read_id);
+      }
     }
 
     void do_deliver(std::uint32_t read_id, std::string data, bool last) {
@@ -143,7 +156,9 @@ namespace clipboard::files::service {
       }
       if (!has_owner || !post || !post(owner, req)) {
         // No control stream to ask: fail the read through the scheduler (reports `gone` to the agent).
-        st().tr->on_chunk_error(req.offer_id, req.request_id, read_error::gone);
+        if (auto *t = tr()) {
+          t->on_chunk_error(req.offer_id, req.request_id, read_error::gone);
+        }
       }
     }
 
@@ -182,8 +197,8 @@ namespace clipboard::files::service {
         st().owner_uuid.clear();
       }
       log_stats(offer, stats);
-      if (st().tr) {
-        st().tr->clear_offer();
+      if (auto *t = tr()) {
+        t->clear_offer();
       }
       {
         std::lock_guard lock {st().mutex};
@@ -209,16 +224,39 @@ namespace clipboard::files::service {
       s.aborted.clear();
       s.active_reads.clear();
       g_active.store(false);
+      g_last_active.store(0);
       s.last_origin.clear();
       s.stats = {};
       s.prefetch_bytes = 0;
-      s.tr.reset();
+      s.tr = std::make_unique<transfer>(make_callbacks(), opt);
     }
-    ensure_transfer(opt);
   }
 
-  bool active() {
-    return g_active.load(std::memory_order_acquire);
+  void configure(hooks h) {
+    auto &s = st();
+    std::lock_guard install {s.install_mutex};
+    std::lock_guard lock {s.mutex};
+    s.h = std::move(h);
+    if (!s.tr) {
+      s.tr = std::make_unique<transfer>(make_callbacks());
+    }
+  }
+
+  bool active(std::chrono::steady_clock::time_point now) {
+    if (g_active.load(std::memory_order_acquire)) {
+      return true;
+    }
+    const auto last = g_last_active.load(std::memory_order_acquire);
+    if (last == 0) {
+      return false;
+    }
+    const std::chrono::steady_clock::time_point at {std::chrono::steady_clock::duration {last}};
+    return now - at < k_active_linger;
+  }
+
+  bool chunk_forbidden(std::string_view uuid) {
+    std::lock_guard lock {st().mutex};
+    return st().has_owner && st().owner_uuid != uuid;
   }
 
   namespace {
@@ -254,26 +292,48 @@ namespace clipboard::files::service {
   }
 
   void tick(std::chrono::steady_clock::time_point now) {
-    ensure_transfer();
-    st().tr->tick(now);
+    if (auto *t = tr()) {
+      t->tick(now);
+    }
   }
 
-  offer_result install_offer(std::uintptr_t session_id, std::string_view mlcf, std::string origin_uuid) {
+  offer_result install_offer(std::uintptr_t session_id, std::string_view mlcf, std::string origin_uuid, std::string *error) {
     auto decoded = decode_manifest(mlcf);
     if (decoded.error != manifest_error::none) {
+      if (error) {
+        *error = error_name(decoded.error);
+      }
       return offer_result::bad_manifest;
     }
+    // Explorer's virtual files and CF_HDROP cannot express longer paths: refuse loudly instead of pasting an incomplete tree.
+    for (const auto &p : sanitize_for_windows(decoded.value.entries)) {
+      if (utf16_length(p) > max_windows_path_utf16) {
+        if (error) {
+          *error = "windows_path_too_long";
+        }
+        return offer_result::bad_manifest;
+      }
+    }
     std::function<bool()> connected;
+    std::function<bool(std::uintptr_t)> encrypted;
     {
       std::lock_guard lock {st().mutex};
       connected = st().h.agent_connected;
+      encrypted = st().h.session_encrypted;
     }
     if (!connected || !connected()) {
       return offer_result::unsupported;
     }
+    // 0x3005 carries the offer id (the capability for chunk POSTs): it may only travel over an encrypted control stream.
+    if (encrypted && !encrypted(session_id)) {
+      return offer_result::forbidden;
+    }
 
     std::lock_guard install {st().install_mutex};
-    ensure_transfer();
+    auto *t = tr();
+    if (!t) {
+      return offer_result::unsupported;
+    }
     clear_current(false);  // logs the previous offer's throughput
 
     bool prefetch;
@@ -287,7 +347,7 @@ namespace clipboard::files::service {
       st().offer = decoded.value.offer_id;
     }
     // Scheduler first so a read_range racing with the agent's offer install is never rejected as stale.
-    st().tr->set_offer(decoded.value);
+    t->set_offer(decoded.value);
     for (const auto &frame : agent::split_offer(decoded.value.offer_id, prefetch, mlcf)) {
       if (!send_frame(frame)) {
         clear_current(true);
@@ -313,9 +373,12 @@ namespace clipboard::files::service {
     if (!id) {
       return false;
     }
-    ensure_transfer();
+    auto *t = tr();
+    if (!t) {
+      return false;
+    }
     const auto size = body.size();
-    if (!st().tr->on_chunk(*id, req, file, offset, std::move(body))) {
+    if (!t->on_chunk(*id, req, file, offset, std::move(body))) {
       return false;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -340,8 +403,8 @@ namespace clipboard::files::service {
     if (!id) {
       return false;
     }
-    ensure_transfer();
-    return st().tr->on_chunk_error(*id, req, err);
+    auto *t = tr();
+    return t && t->on_chunk_error(*id, req, err);
   }
 
   void session_ended(std::uintptr_t session_id) {
@@ -365,7 +428,10 @@ namespace clipboard::files::service {
   }
 
   void handle_agent_message(const agent::message &m) {
-    ensure_transfer();
+    auto *t = tr();
+    if (!t) {
+      return;
+    }
     switch (m.type) {
       case agent::msg::read_range:
         {
@@ -373,22 +439,19 @@ namespace clipboard::files::service {
           if (!r) {
             return;
           }
-          const auto cur = st().tr->current_offer();
-          if (!cur || *cur != r->offer) {
-            send_error(r->read_id, read_error::gone);
-            return;
-          }
+          // The offer check and the start are one atomic step inside the scheduler (a new offer can arrive any time).
           read_started(r->read_id);
-          if (!st().tr->start_read(r->read_id, r->file_index, r->offset, r->length)) {
-            read_finished(r->read_id);
-            send_error(r->read_id, read_error::io);
+          const auto res = t->start_read(r->offer, r->read_id, r->file_index, r->offset, r->length);
+          if (res != start_result::ok) {
+            read_finished(r->read_id, false);
+            send_error(r->read_id, res == start_result::gone ? read_error::gone : read_error::io);
           }
           return;
         }
       case agent::msg::cancel_read:
         if (const auto id = agent::decode_cancel_read(m.payload)) {
           read_finished(*id);
-          st().tr->cancel_read(*id);
+          t->cancel_read(*id);
         }
         return;
       case agent::msg::offer_dropped:

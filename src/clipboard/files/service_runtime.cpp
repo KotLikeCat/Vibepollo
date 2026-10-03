@@ -56,6 +56,14 @@ namespace clipboard::files::service {
       }
       return false;
     };
+    h.session_encrypted = [](std::uintptr_t id) {
+      for (const auto &session : rtsp_stream::get_sessions_snapshot()) {
+        if (reinterpret_cast<std::uintptr_t>(session.get()) == id) {
+          return stream::session::control_encrypted(*session);
+        }
+      }
+      return false;
+    };
     h.agent_connected = [] {
       return platf::clipboard_agent::connected();
     };
@@ -65,7 +73,7 @@ namespace clipboard::files::service {
     h.log = [](const std::string &line) {
       BOOST_LOG(info) << line;
     };
-    set_test_hooks(std::move(h));
+    configure(std::move(h));
     set_prefetch_bytes(config::sunshine.clipboard_files_prefetch_bytes);
 
     g_agent_started = platf::clipboard_agent::start(

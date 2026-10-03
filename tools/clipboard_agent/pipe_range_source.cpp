@@ -4,6 +4,8 @@
  */
 #include "pipe_range_source.h"
 
+#include <algorithm>
+
 namespace clipboard_agent {
   namespace agent = clipboard::files::agent;
   using clipboard::files::read_error;
@@ -72,8 +74,11 @@ namespace clipboard_agent {
     }
 
     std::unique_lock lock(m_);
-    const auto deadline = std::chrono::steady_clock::now() + timeout_;
+    const auto started = std::chrono::steady_clock::now();
     for (;;) {
+      // Progress-aware: any range_data frame (of any read) restarts the clock, so a slow uplink slows the paste
+      // instead of failing it; only a pipe that delivers nothing for `timeout_` fails the read.
+      const auto deadline = std::max(started, last_progress_) + timeout_;
       auto it = pending_.find(id);
       if (it == pending_.end()) {  // shutdown() cleared it
         return finish({false, read_error::io});
@@ -104,6 +109,7 @@ namespace clipboard_agent {
 
   void pipe_range_source::on_range_data(const agent::range_data_t &v) {
     std::lock_guard lock(m_);
+    last_progress_ = std::chrono::steady_clock::now();
     auto it = pending_.find(v.read_id);
     if (it == pending_.end()) {
       return;  // cancelled or unknown

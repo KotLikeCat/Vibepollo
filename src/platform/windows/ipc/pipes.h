@@ -224,6 +224,12 @@ namespace platf::dxgi {
     void send(std::span<const uint8_t> message);
 
     /**
+     * @brief Like send(), but reports whether the whole message was written.
+     * @return `false` when the pipe is not connected or the write failed / timed out (the wire may hold a partial frame).
+     */
+    bool try_send(std::span<const uint8_t> message);
+
+    /**
      * @brief Waits for a client to connect to the pipe.
      * @param milliseconds Timeout in milliseconds to wait for connection.
      */
@@ -372,7 +378,7 @@ namespace platf::dxgi {
      * @param bytesWritten Reference to the number of bytes written.
      * @return True if the error was handled, false otherwise.
      */
-    bool handle_send_error(io_context &ctx, int timeout_ms, DWORD &bytesWritten);
+    bool handle_send_error(io_context &ctx, int timeout_ms, DWORD &bytesWritten, size_t expected);
 
     /**
      * @brief Handles a pending send operation.
@@ -381,7 +387,7 @@ namespace platf::dxgi {
      * @param bytesWritten Reference to the number of bytes written.
      * @return True if the operation completed, false otherwise.
      */
-    bool handle_pending_send_operation(io_context &ctx, int timeout_ms, DWORD &bytesWritten);
+    bool handle_pending_send_operation(io_context &ctx, int timeout_ms, DWORD &bytesWritten, size_t expected);
 
     /**
      * @brief Handles errors during receive operations.

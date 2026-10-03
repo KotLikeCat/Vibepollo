@@ -6102,12 +6102,18 @@ namespace nvhttp {
         return;
       }
       const auto body = request->content.string();
-      switch (clipboard::files::service::install_offer(reinterpret_cast<std::uintptr_t>(session.get()), body, verified_client->uuid)) {
+      std::string reason;
+      switch (clipboard::files::service::install_offer(reinterpret_cast<std::uintptr_t>(session.get()), body, verified_client->uuid, &reason)) {
         case clipboard::files::service::offer_result::ok:
           response->write(SimpleWeb::StatusCode::success_ok);
           return;
         case clipboard::files::service::offer_result::bad_manifest:
-          bad(SimpleWeb::StatusCode::client_error_bad_request);
+          // The client shows the reason (manifest error_name or windows_path_too_long).
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, SimpleWeb::CaseInsensitiveMultimap {{"X-Clipboard-Error", reason}});
+          response->close_connection_after_response = true;
+          return;
+        case clipboard::files::service::offer_result::forbidden:
+          bad(SimpleWeb::StatusCode::client_error_forbidden);
           return;
         case clipboard::files::service::offer_result::unsupported:
           bad(SimpleWeb::StatusCode::server_error_service_unavailable);
@@ -6116,7 +6122,11 @@ namespace nvhttp {
       return;
     }
 
-    // file-chunk
+    // file-chunk: only the client that made the offer may answer its requests
+    if (clipboard::files::service::chunk_forbidden(verified_client->uuid)) {
+      bad(SimpleWeb::StatusCode::client_error_forbidden, false);
+      return;
+    }
     const auto query = clipboard::files::service::parse_chunk_query(get_arg(args, "offer", ""), get_arg(args, "req", ""), get_arg(args, "file", ""), get_arg(args, "offset", ""));
     if (!query) {
       bad(SimpleWeb::StatusCode::client_error_bad_request);

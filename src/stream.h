@@ -131,6 +131,8 @@ namespace stream {
     std::string uuid(const session_t &session);
     /// Queues a 0x3005 request for this session's control stream; never coalesced.
     void post_clipboard_file_request(session_t &session, const clipboard::files::chunk_request &req);
+    /// True when the session's control stream is encrypted (0x3005 must never be sent otherwise).
+    bool control_encrypted(const session_t &session);
     void post_clipboard_changed(session_t &session, std::uint32_t seq, std::uint32_t formats);
     crypto::PERM permission(session_t &session);
     bool uuid_match(const session_t &session, const std::string_view &uuid);

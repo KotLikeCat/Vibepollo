@@ -53,6 +53,8 @@ namespace clipboard::files {
   inline constexpr std::size_t max_path_bytes = 1024;
   inline constexpr std::size_t max_component_utf16 = 255;
   inline constexpr std::size_t max_manifest_bytes = 32u << 20;
+  /// Longest sanitized relative path the host accepts (FILEDESCRIPTORW::cFileName holds MAX_PATH incl. the NUL).
+  inline constexpr std::size_t max_windows_path_utf16 = 259;
 
   struct decode_result {
     manifest value;
@@ -65,6 +67,8 @@ namespace clipboard::files {
   std::uint64_t total_size(const manifest &m);
   /// Index-aligned Windows-safe relative paths ('\\' separators, UTF-8).
   std::vector<std::string> sanitize_for_windows(const std::vector<entry> &entries);
+  /// Length of valid UTF-8 `s` in UTF-16 code units.
+  std::size_t utf16_length(std::string_view s);
   std::string offer_id_hex(const offer_id_t &id);
   std::optional<offer_id_t> parse_offer_id_hex(std::string_view hex);
   const char *error_name(manifest_error e);

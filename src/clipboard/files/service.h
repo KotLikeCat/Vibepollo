@@ -28,26 +28,35 @@ namespace clipboard::files::service {
     std::function<bool()> agent_connected;
     /// The agent wrote the host clipboard (sequence number) on behalf of the offering client.
     std::function<void(std::uint32_t seq, const std::string &origin_uuid)> note_clipboard_set;
+    /// Optional: is the session's control stream encrypted? (null = always). 0x3005 must never travel in plaintext.
+    std::function<bool(std::uintptr_t session_id)> session_encrypted;
     /// Optional: is the control session still alive? (null = always)
     std::function<bool(std::uintptr_t session_id)> session_alive;
     /// Info-level log sink (throughput summary per offer).
     std::function<void(const std::string &line)> log;
   };
 
-  enum class offer_result { ok, bad_manifest, unsupported };
+  enum class offer_result { ok, bad_manifest, unsupported, forbidden };
 
   /// Creates the transfer, starts the ticker and the platform agent. Safe to call once; stop() undoes it.
   void start();
+  /// Production wiring: installs `h` and creates the transfer exactly once (never replaced afterwards).
+  void configure(hooks h);
   void stop();
 
   /// Decode + validate `mlcf`, replace the current offer (agent first, then the scheduler).
   /// `origin_uuid` is the offering client (used for clipboard echo suppression).
-  offer_result install_offer(std::uintptr_t session_id, std::string_view mlcf, std::string origin_uuid = {});
+  /// bad_manifest: `*error` (when given) receives the reason token: a manifest error_name, or `windows_path_too_long`
+  /// when a sanitized relative path exceeds 259 UTF-16 units. forbidden: the owning control stream is not encrypted.
+  offer_result install_offer(std::uintptr_t session_id, std::string_view mlcf, std::string origin_uuid = {}, std::string *error = nullptr);
   /// false -> HTTP 410. `connection_key` identifies the TCP connection (remote address:port) for keep-alive accounting.
   bool on_chunk(std::string_view offer_hex, std::uint32_t req, std::uint32_t file, std::uint64_t offset, std::string body, std::string_view connection_key = {});
   bool on_chunk_error(std::string_view offer_hex, std::uint32_t req, read_error err);
-  /// Lock-free: true while any agent read is in flight (the control loop then iterates fast so 0x3005 requests are not delayed).
-  bool active();
+  /// Lock-free: true while any agent read is in flight and for 2 s after the last one ended (the control loop then
+  /// iterates fast so 0x3005 requests are not delayed between files / window refills). `now` is injectable for tests.
+  bool active(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  /// True when an offer is installed and `uuid` is not the client that made it (file-chunk POSTs -> 403).
+  bool chunk_forbidden(std::string_view uuid);
 
   struct chunk_query {
     offer_id_t offer;

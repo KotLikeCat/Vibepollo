@@ -47,6 +47,7 @@ namespace clipboard_agent {
 
   private:
     void run();
+    void apply_mtimes();
     void worker();
     bool claim(std::size_t &index, std::uint64_t &offset, std::uint32_t &len);
 

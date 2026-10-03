@@ -952,7 +952,7 @@ namespace platf::dxgi {
 
     DWORD bytesWritten = 0;
     if (BOOL result = WriteFile(_pipe.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &bytesWritten, ctx.get()); !result) {
-      return handle_send_error(ctx, timeout_ms, bytesWritten);
+      return handle_send_error(ctx, timeout_ms, bytesWritten, bytes.size());
     }
 
     if (bytesWritten != bytes.size()) {
@@ -962,10 +962,10 @@ namespace platf::dxgi {
     return true;
   }
 
-  bool WinPipe::handle_send_error(io_context &ctx, int timeout_ms, DWORD &bytesWritten) {
+  bool WinPipe::handle_send_error(io_context &ctx, int timeout_ms, DWORD &bytesWritten, size_t expected) {
     DWORD err = GetLastError();
     if (err == ERROR_IO_PENDING) {
-      return handle_pending_send_operation(ctx, timeout_ms, bytesWritten);
+      return handle_pending_send_operation(ctx, timeout_ms, bytesWritten, expected);
     } else if (err == ERROR_BROKEN_PIPE) {
       BOOST_LOG(warning) << "Pipe broken during WriteFile (ERROR_BROKEN_PIPE)";
       _connected.store(false, std::memory_order_release);
@@ -976,7 +976,7 @@ namespace platf::dxgi {
     }
   }
 
-  bool WinPipe::handle_pending_send_operation(io_context &ctx, int timeout_ms, DWORD &bytesWritten) {
+  bool WinPipe::handle_pending_send_operation(io_context &ctx, int timeout_ms, DWORD &bytesWritten, size_t expected) {
     DWORD waitResult = WaitForSingleObject(ctx.event(), timeout_ms);
 
     if (waitResult == WAIT_OBJECT_0) {
@@ -990,15 +990,23 @@ namespace platf::dxgi {
         }
         return false;
       }
+      if (bytesWritten != expected) {
+        BOOST_LOG(error) << "Overlapped WriteFile wrote " << bytesWritten << " bytes, expected " << expected;
+        return false;
+      }
       return true;
     } else if (waitResult == WAIT_TIMEOUT) {
       BOOST_LOG(warning) << "Send operation timed out after " << timeout_ms << "ms";
       CancelIoEx(_pipe.get(), ctx.get());
       DWORD transferred = 0;
-      // The write may have completed in the race window; report it as sent.
+      // The write may have completed in the race window; it only counts as sent when every byte went out.
+      // A partially written frame must never be reported as success: the peer would resynchronize on wrong bytes.
       if (GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE)) {
         bytesWritten = transferred;
-        return true;
+        if (transferred == expected) {
+          return true;
+        }
+        BOOST_LOG(error) << "Send timed out after a partial write (" << transferred << " of " << expected << " bytes)";
       }
       return false;
     } else {
@@ -1318,15 +1326,25 @@ namespace platf::dxgi {
   }
 
   void AsyncNamedPipe::send(std::span<const uint8_t> message) {
+    (void) try_send(message);
+  }
+
+  bool AsyncNamedPipe::try_send(std::span<const uint8_t> message) {
     // Multiple producers (the pipe worker, helper state callbacks, and
     // dispatcher completions) can reply concurrently. Serialize complete
     // writes so their byte-mode frames cannot be interleaved on the wire.
     std::lock_guard<std::mutex> lock(_send_mutex);
-    safe_execute_operation("send", [this, message]() {
-      if (_pipe && _pipe->is_connected() && !_pipe->send(message, 5000)) {  // 5 second timeout for async sends
+    bool ok = false;
+    safe_execute_operation("send", [this, message, &ok]() {
+      if (!_pipe || !_pipe->is_connected()) {
+        return;
+      }
+      ok = _pipe->send(message, 5000);  // 5 second timeout for async sends
+      if (!ok) {
         BOOST_LOG(warning) << "Failed to send message through AsyncNamedPipe (timeout or error)";
       }
     });
+    return ok;
   }
 
   void AsyncNamedPipe::disconnect_pipe() {

@@ -6,6 +6,7 @@
 #include "src/clipboard/files/manifest.h"
 #include "src/clipboard/files/service.h"
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -311,19 +312,36 @@ TEST_F(fixture, ActiveTracksReads) {
   read_range(1, make_id(), 0, 0, 100);
   EXPECT_TRUE(svc::active());
   svc::on_chunk(offer_id_hex(make_id()), posted.at(0).second.request_id, 0, 0, std::string(100, 'x'));
-  EXPECT_FALSE(svc::active());  // completed
+  const auto later = [] {
+    return std::chrono::steady_clock::now() + std::chrono::milliseconds(2100);  // past the 2 s linger
+  };
+  EXPECT_FALSE(svc::active(later()));  // completed
   read_range(2, make_id(), 0, 0, 100);
-  EXPECT_TRUE(svc::active());
+  EXPECT_TRUE(svc::active(later()));  // in flight: no linger needed
   svc::on_chunk_error(offer_id_hex(make_id()), posted.at(1).second.request_id, read_error::io);
-  EXPECT_FALSE(svc::active());  // failed
+  EXPECT_FALSE(svc::active(later()));  // failed
   read_range(3, make_id(), 0, 0, 100);
-  EXPECT_TRUE(svc::active());
+  EXPECT_TRUE(svc::active(later()));
   svc::handle_agent_message({ag::msg::cancel_read, ag::encode_cancel_read(3).substr(1)});
-  EXPECT_FALSE(svc::active());  // cancelled
+  EXPECT_FALSE(svc::active(later()));  // cancelled
   read_range(4, make_id(), 0, 0, 100);
-  EXPECT_TRUE(svc::active());
+  EXPECT_TRUE(svc::active(later()));
   svc::session_ended(owner_session);
-  EXPECT_FALSE(svc::active());  // offer cleared
+  EXPECT_FALSE(svc::active(later()));  // offer cleared
+}
+
+TEST_F(fixture, ActiveLingersTwoSecondsAfterLastRead) {
+  EXPECT_FALSE(svc::active());
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(3 * MiB)), svc::offer_result::ok);
+  read_range(1, make_id(), 0, 0, 100);
+  svc::on_chunk(offer_id_hex(make_id()), posted.at(0).second.request_id, 0, 0, std::string(100, 'x'));
+  const auto done = std::chrono::steady_clock::now();
+  EXPECT_TRUE(svc::active(done));  // right after the read finished: still fast
+  EXPECT_TRUE(svc::active(done + std::chrono::milliseconds(1500)));
+  EXPECT_FALSE(svc::active(done + std::chrono::milliseconds(2100)));
+  // The next file's read re-arms it immediately.
+  read_range(2, make_id(), 0, 0, 100);
+  EXPECT_TRUE(svc::active(done + std::chrono::seconds(10)));
 }
 
 TEST(clipboard_files_query, StrictParsing) {
@@ -368,4 +386,87 @@ TEST_F(fixture, ClipboardSetWithoutOriginIsSkipped) {
   ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(10)), svc::offer_result::ok);
   svc::handle_agent_message({ag::msg::clipboard_set, ag::encode_clipboard_set(7).substr(1)});
   EXPECT_TRUE(notes.empty());
+}
+
+namespace {
+  std::string deep_mlcf(std::size_t levels, std::size_t component) {
+    manifest m;
+    m.offer_id = make_id();
+    std::string path;
+    for (std::size_t i = 0; i < levels; ++i) {
+      if (i) {
+        path += '/';
+      }
+      path += std::string(component, static_cast<char>('a' + i));
+      m.entries.push_back({i + 1 == levels ? entry_kind::file : entry_kind::directory, i + 1 == levels ? 3u : 0u, 0, path});
+    }
+    return encode_manifest(m);
+  }
+}  // namespace
+
+TEST_F(fixture, LongWindowsPathIsRejectedWithToken) {
+  std::string why;
+  // 4 x 100 + 3 separators = 403 UTF-16 units > 259
+  EXPECT_EQ(svc::install_offer(owner_session, deep_mlcf(4, 100), "u", &why), svc::offer_result::bad_manifest);
+  EXPECT_EQ(why, "windows_path_too_long");
+  EXPECT_TRUE(frames.empty());
+  read_range(1, make_id(), 0, 0, 3);  // nothing was installed
+  ASSERT_EQ(errors().size(), 1u);
+  EXPECT_EQ(errors()[0].error, read_error::gone);
+  // exactly at the limit is fine: 259 = 2 x 129 + 1 separator
+  why.clear();
+  EXPECT_EQ(svc::install_offer(owner_session, deep_mlcf(2, 129), "u", &why), svc::offer_result::ok);
+  EXPECT_TRUE(why.empty());
+  // one over: 2 x 130 + 1 = 261 > 259 (also covers an install replacing a good offer: it must not clear it)
+  EXPECT_EQ(svc::install_offer(owner_session, deep_mlcf(2, 130), "u", &why), svc::offer_result::bad_manifest);
+  EXPECT_EQ(why, "windows_path_too_long");
+}
+
+TEST_F(fixture, OtherBadManifestsReportTheirErrorName) {
+  std::string why;
+  EXPECT_EQ(svc::install_offer(owner_session, "garbage", "u", &why), svc::offer_result::bad_manifest);
+  EXPECT_EQ(why, error_name(decode_manifest("garbage").error));
+  EXPECT_FALSE(why.empty());
+  manifest empty;
+  empty.offer_id = make_id();
+  EXPECT_EQ(svc::install_offer(owner_session, encode_manifest(empty), "u", &why), svc::offer_result::bad_manifest);
+  EXPECT_EQ(why, "empty");
+}
+
+TEST_F(fixture, UnencryptedControlStreamIsForbidden) {
+  bool encrypted = false;
+  svc::hooks h;
+  h.send_frame = [](const std::string &) { return true; };
+  h.agent_connected = [] { return true; };
+  h.post_request = [](std::uintptr_t, const chunk_request &) { return true; };
+  h.session_encrypted = [&](std::uintptr_t) { return encrypted; };
+  svc::set_test_hooks(std::move(h));
+  EXPECT_EQ(svc::install_offer(owner_session, make_mlcf(MiB), "u"), svc::offer_result::forbidden);
+  EXPECT_FALSE(svc::chunk_forbidden("someone"));  // nothing installed
+  encrypted = true;
+  EXPECT_EQ(svc::install_offer(owner_session, make_mlcf(MiB), "u"), svc::offer_result::ok);
+}
+
+TEST_F(fixture, ChunkPostsAreBoundToTheOfferingClient) {
+  EXPECT_FALSE(svc::chunk_forbidden("anyone"));  // no offer: the chunk is simply 410
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(MiB), "owner-uuid"), svc::offer_result::ok);
+  EXPECT_FALSE(svc::chunk_forbidden("owner-uuid"));
+  EXPECT_TRUE(svc::chunk_forbidden("other-uuid"));
+  svc::session_ended(owner_session);
+  EXPECT_FALSE(svc::chunk_forbidden("other-uuid"));
+}
+
+TEST_F(fixture, ReadFromSupersededOfferIsGoneAtomically) {
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(MiB, 0), "u"), svc::offer_result::ok);
+  ASSERT_EQ(svc::install_offer(owner_session, make_mlcf(MiB, 9), "u"), svc::offer_result::ok);  // B replaces A
+  frames.clear();
+  read_range(1, make_id(0), 0, 0, 10);  // the old data object still asks with A's id
+  EXPECT_TRUE(posted.empty());
+  ASSERT_EQ(errors().size(), 1u);
+  EXPECT_EQ(errors()[0].error, read_error::gone);
+  EXPECT_FALSE(svc::active(std::chrono::steady_clock::now() + std::chrono::seconds(3)));
+  // invalid range on the current offer maps to io
+  read_range(2, make_id(9), 0, MiB, 10);
+  ASSERT_EQ(errors().size(), 2u);
+  EXPECT_EQ(errors()[1].error, read_error::io);
 }

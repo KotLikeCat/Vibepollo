@@ -466,6 +466,10 @@ namespace clipboard::files {
     return result;
   }
 
+  std::size_t utf16_length(std::string_view s) {
+    return utf16_len(s);
+  }
+
   std::string offer_id_hex(const offer_id_t &id) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string out;
