@@ -578,10 +578,6 @@ int main(int argc, char *argv[]) {
     // pathological message loop cannot hang process teardown indefinitely.
     shutdown_deadline.arm();
 
-  if (clipboard_agent_started) {
-    platf::clipboard_agent::stop();
-  }
-
     auto request_session_monitor_shutdown = [&](bool force_quit_only) {
       if (!force_quit_only) {
         if (session_monitor_hwnd_future.wait_for(1s) == std::future_status::ready) {
@@ -1042,6 +1038,10 @@ int main(int argc, char *argv[]) {
   // The signal handler only wakes main; start the owned watchdog here so it
   // never constructs threads or queues work from signal context.
   shutdown_deadline.arm();
+
+  if (clipboard_agent_started) {
+    platf::clipboard_agent::stop();
+  }
 
   // Joins the mic worker, which may be inside a stuck WASAPI call; the watchdog above bounds the wait.
   mic::receiver::shutdown();

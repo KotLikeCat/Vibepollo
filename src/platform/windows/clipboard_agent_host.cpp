@@ -16,6 +16,9 @@
 #include <thread>
 
 // local includes
+#include <windows.h>
+#include <WtsApi32.h>
+
 #include "src/logging.h"
 #include "src/platform/clipboard_agent.h"
 #include "src/platform/windows/ipc/misc_utils.h"
