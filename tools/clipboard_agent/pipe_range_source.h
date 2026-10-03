@@ -14,15 +14,17 @@
 #include <mutex>
 
 namespace clipboard_agent {
-  class pipe_range_source final: public range_source {
+  /// Request router shared by all offers; hand each data object a source bound to *its* offer id with bind().
+  class pipe_range_source final: public std::enable_shared_from_this<pipe_range_source> {
   public:
     /// `send` writes one complete frame to the pipe (thread-safe); returns false when the pipe is gone.
     using sender = std::function<bool(const std::string &frame)>;
 
     explicit pipe_range_source(sender send, std::chrono::milliseconds read_timeout = std::chrono::seconds(60));
 
-    read_result read(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out) override;
-    read_result read_cancellable(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out, const std::shared_ptr<cancel_token> &token) override;
+    /// A range_source whose every read_range frame carries `offer` (never a global "current offer").
+    std::shared_ptr<range_source> bind(const clipboard::files::offer_id_t &offer);
+    read_result read(const clipboard::files::offer_id_t &offer, std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out, const std::shared_ptr<cancel_token> &token);
 
     /// Called by the pipe receive thread.
     void on_range_data(const clipboard::files::agent::range_data_t &v);

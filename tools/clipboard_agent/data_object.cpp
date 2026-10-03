@@ -275,11 +275,18 @@ namespace clipboard_agent {
         const auto &path = o_.windows_paths[*e];
         const auto slash = path.rfind('\\');
         const auto leaf = utf_utils::from_utf8(slash == std::string::npos ? path : path.substr(slash + 1));
-        IStream *s = nullptr;
-        if (pf_ && pf_->current() == prefetcher::state::done) {
-          s = create_disk_stream(pf_->path_for(*e), en.size, leaf, en.mtime_ms);
-        } else {
-          s = create_remote_stream(src_, static_cast<std::uint32_t>(*e), en.size, leaf, en.mtime_ms);
+        const bool from_disk = pf_ && pf_->current() == prefetcher::state::done;
+        const auto size = en.size;
+        const auto mtime = en.mtime_ms;
+        const auto index = static_cast<std::uint32_t>(*e);
+        IStream *s = create_mta_hosted_stream([&]() -> IStream * {
+          if (from_disk) {
+            return create_disk_stream(pf_->path_for(*e), size, leaf, mtime);
+          }
+          return create_remote_stream(src_, index, size, leaf, mtime);
+        });
+        if (s == nullptr) {
+          return E_FAIL;
         }
         med->tymed = TYMED_ISTREAM;
         med->pstm = s;

@@ -9,6 +9,7 @@
 
 #include "data_object.h"
 #include "pipe_range_source.h"
+#include "file_stream.h"
 #include "prefetch.h"
 #include "src/clipboard/files/agent_protocol.h"
 #include "src/clipboard/files/manifest.h"
@@ -17,6 +18,7 @@
 #include <boost/log/core.hpp>
 
 #include <ole2.h>
+#include <shlobj.h>
 #include <windows.h>
 
 #include <atomic>
@@ -39,7 +41,7 @@ namespace {
 
   std::unique_ptr<INamedPipe> g_pipe;
   std::mutex g_send_mutex;
-  std::shared_ptr<clipboard_agent::pipe_range_source> g_source;
+  std::shared_ptr<clipboard_agent::pipe_range_source> g_source;  // request router; every offer gets g_source->bind(its id)
   HWND g_hwnd = nullptr;
   std::filesystem::path g_prefetch_root;
 
@@ -56,6 +58,12 @@ namespace {
   }
 
   std::filesystem::path default_prefetch_root() {
+    PWSTR known = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &known)) && known != nullptr) {
+      std::filesystem::path p(known);
+      CoTaskMemFree(known);
+      return p / L"Temp" / L"Vibepollo" / L"clipboard";
+    }
     std::wstring base(MAX_PATH, L'\0');
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base.data(), static_cast<DWORD>(base.size()));
     if (n == 0 || n >= base.size()) {
@@ -93,8 +101,12 @@ namespace {
   void handle_set_offer(clipboard_agent::offer *raw) {
     std::unique_ptr<clipboard_agent::offer> o(raw);
     const auto id = o->id;
-    release_object();
-    IDataObject *obj = clipboard_agent::create_data_object(std::move(*o), g_source, g_prefetch_root);
+    if (g_object != nullptr && g_object_id == id && OleIsCurrentClipboard(g_object) == S_OK) {
+      // Same offer re-announced while it is still ours: keep the live object (and its prefetch folder).
+      send_frame(agent::encode_clipboard_set(GetClipboardSequenceNumber()));
+      return;
+    }
+    IDataObject *obj = clipboard_agent::create_data_object(std::move(*o), g_source->bind(id), g_prefetch_root);
     HRESULT hr = E_FAIL;
     for (int attempt = 0; attempt < 10; ++attempt) {
       hr = OleSetClipboard(obj);
@@ -104,10 +116,12 @@ namespace {
       Sleep(50);  // clipboard briefly locked by another app
     }
     if (FAILED(hr)) {
+      // Whatever was on the clipboard before is still there and still tracked (g_object untouched).
       obj->Release();
       send_frame(agent::encode_offer_dropped(id));
       return;
     }
+    release_object();  // only now: OLE has dropped its reference to the previous object
     g_object = obj;
     g_object_id = id;
     send_frame(agent::encode_clipboard_set(GetClipboardSequenceNumber()));
@@ -155,6 +169,9 @@ namespace {
 
   void handle_set_offer_part(agent::offer_assembler &assembler, const std::string &payload) {
     auto done = assembler.add(payload);
+    if (auto failed = assembler.take_failure()) {
+      send_frame(agent::encode_offer_dropped(*failed));
+    }
     if (!done) {
       return;
     }
@@ -267,8 +284,11 @@ int main(int argc, char **argv) {
   }
 
   // Shutting down: drop our offer from the clipboard if it is still ours.
-  g_pipe->disconnect();
-  g_source->shutdown();
+  g_source->shutdown();  // no further cancel_read sends; blocked reads return
+  {
+    std::lock_guard lock(g_send_mutex);  // ordered after any sender still inside send_frame
+    g_pipe->disconnect();
+  }
   if (rx.joinable()) {
     rx.join();
   }
@@ -276,6 +296,7 @@ int main(int argc, char **argv) {
     OleSetClipboard(nullptr);
   }
   release_object();
+  clipboard_agent::shutdown_mta_host();  // after the last stream/data object is gone
   RemoveClipboardFormatListener(g_hwnd);
   OleUninitialize();
   return 0;

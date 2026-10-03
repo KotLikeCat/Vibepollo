@@ -83,15 +83,20 @@ TEST(ClipboardFilesProtocol, ClearAndDropped) {
 }
 
 TEST(ClipboardFilesProtocol, ReadRange) {
-  auto p = payload_of(ag::encode_read_range({7, 2, 5000000000ull, 4u << 20}), ag::msg::read_range);
-  EXPECT_EQ(p.size(), 24u);
+  auto p = payload_of(ag::encode_read_range({7, make_id(3), 2, 5000000000ull, 4u << 20}), ag::msg::read_range);
+  EXPECT_EQ(p.size(), 40u);
   auto v = ag::decode_read_range(p);
   ASSERT_TRUE(v);
   EXPECT_EQ(v->read_id, 7u);
+  EXPECT_EQ(v->offer, make_id(3));
   EXPECT_EQ(v->file_index, 2u);
   EXPECT_EQ(v->offset, 5000000000ull);
   EXPECT_EQ(v->length, 4u << 20);
+  EXPECT_EQ(p.substr(4, 16), std::string(make_id(3).begin(), make_id(3).end()));  // 16 raw bytes right after read_id
   EXPECT_FALSE(ag::decode_read_range(p.substr(1)));
+  EXPECT_FALSE(ag::decode_read_range(p.substr(0, 39)));  // truncated
+  EXPECT_FALSE(ag::decode_read_range(p.substr(0, 10)));  // truncated inside the offer id
+  EXPECT_FALSE(ag::decode_read_range(p + "x"));
 }
 
 TEST(ClipboardFilesProtocol, RangeDataAndError) {
@@ -190,6 +195,13 @@ TEST(ClipboardFilesProtocol, AssemblerRestartsOnNewOffer) {
 TEST(ClipboardFilesProtocol, AssemblerRejectsMalformed) {
   ag::offer_assembler a;
   EXPECT_FALSE(a.add("short"));
+  EXPECT_FALSE(a.take_failure());  // nothing was being assembled
+  std::string big(2u << 20, 'a');
+  auto first = ag::split_offer(make_id(5), false, big);
+  EXPECT_FALSE(a.add(ag::decode(first[0])->payload));
+  EXPECT_FALSE(a.add("short"));  // garbage in the middle of an assembly abandons it
+  ASSERT_TRUE(a.take_failure());
+  EXPECT_FALSE(a.take_failure());
 }
 
 TEST(ClipboardFilesProtocol, AssemblerCapsSize) {
@@ -203,4 +215,7 @@ TEST(ClipboardFilesProtocol, AssemblerCapsSize) {
     }
   }
   EXPECT_FALSE(completed);
+  auto failed = a.take_failure();
+  ASSERT_TRUE(failed);
+  EXPECT_EQ(*failed, make_id());
 }

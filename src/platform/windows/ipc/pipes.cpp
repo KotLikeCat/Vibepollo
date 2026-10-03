@@ -995,7 +995,11 @@ namespace platf::dxgi {
       BOOST_LOG(warning) << "Send operation timed out after " << timeout_ms << "ms";
       CancelIoEx(_pipe.get(), ctx.get());
       DWORD transferred = 0;
-      GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE);
+      // The write may have completed in the race window; report it as sent.
+      if (GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE)) {
+        bytesWritten = transferred;
+        return true;
+      }
       return false;
     } else {
       BOOST_LOG(error) << "WaitForSingleObject failed in send, result=" << waitResult << ", error=" << GetLastError();
@@ -1093,7 +1097,12 @@ namespace platf::dxgi {
     } else if (waitResult == WAIT_TIMEOUT) {
       CancelIoEx(_pipe.get(), ctx.get());
       DWORD transferred = 0;
-      GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE);
+      // The read may have completed in the window between the wait timing out and the cancel; dropping those
+      // bytes would desynchronise FramedPipe, so report them as a normal success.
+      if (GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE) && transferred > 0) {
+        bytesRead = static_cast<size_t>(transferred);
+        return Success;
+      }
       return Timeout;
     } else {
       BOOST_LOG(error) << "WinPipe::receive() wait failed, result=" << waitResult << ", error=" << GetLastError();
@@ -1178,7 +1187,9 @@ namespace platf::dxgi {
       CancelIoEx(_pipe.get(), ctx.get());
       // Wait for cancellation to complete to ensure OVERLAPPED structure safety
       DWORD transferred = 0;
-      GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE);
+      if (GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE)) {
+        _connected = true;  // the client connected in the race window
+      }
     } else {
       BOOST_LOG(error) << "ConnectNamedPipe wait failed, waitResult=" << waitResult << ", error=" << GetLastError();
     }

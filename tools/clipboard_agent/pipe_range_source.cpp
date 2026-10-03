@@ -12,11 +12,32 @@ namespace clipboard_agent {
       send_(std::move(send)),
       timeout_(read_timeout) {}
 
-  read_result pipe_range_source::read(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out) {
-    return read_cancellable(file_index, offset, length, out, nullptr);
+  namespace {
+    class bound_source final: public range_source {
+    public:
+      bound_source(std::shared_ptr<pipe_range_source> owner, clipboard::files::offer_id_t offer):
+          owner_(std::move(owner)),
+          offer_(offer) {}
+
+      read_result read(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out) override {
+        return owner_->read(offer_, file_index, offset, length, out, nullptr);
+      }
+
+      read_result read_cancellable(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out, const std::shared_ptr<cancel_token> &token) override {
+        return owner_->read(offer_, file_index, offset, length, out, token);
+      }
+
+    private:
+      std::shared_ptr<pipe_range_source> owner_;
+      clipboard::files::offer_id_t offer_;
+    };
+  }  // namespace
+
+  std::shared_ptr<range_source> pipe_range_source::bind(const clipboard::files::offer_id_t &offer) {
+    return std::make_shared<bound_source>(shared_from_this(), offer);
   }
 
-  read_result pipe_range_source::read_cancellable(std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out, const std::shared_ptr<cancel_token> &token) {
+  read_result pipe_range_source::read(const clipboard::files::offer_id_t &offer, std::uint32_t file_index, std::uint64_t offset, std::uint32_t length, std::string &out, const std::shared_ptr<cancel_token> &token) {
     out.clear();
     std::uint32_t id = 0;
     {
@@ -27,22 +48,24 @@ namespace clipboard_agent {
       id = ++next_id_;
       pending p;
       p.expected = length;
+      p.data.reserve(length);
       pending_.emplace(id, std::move(p));
     }
+    std::uint64_t hook_id = 0;
     if (token) {
-      token->set_hook([this] {
+      hook_id = token->add_hook([this] {
         std::lock_guard lock(m_);
         cv_.notify_all();
       });
     }
     auto finish = [&](read_result rr) {
       if (token) {
-        token->set_hook({});
+        token->remove_hook(hook_id);
       }
       return rr;
     };
 
-    if (!send_(agent::encode_read_range({id, file_index, offset, length}))) {
+    if (!send_(agent::encode_read_range({id, offer, file_index, offset, length}))) {
       std::lock_guard lock(m_);
       pending_.erase(id);
       return finish({false, read_error::io});
@@ -67,9 +90,12 @@ namespace clipboard_agent {
       const bool cancelled = token && token->cancelled();
       const bool timed_out = std::chrono::steady_clock::now() >= deadline;
       if (cancelled || timed_out || dead_) {
+        const bool was_dead = dead_;
         pending_.erase(it);
         lock.unlock();
-        send_(agent::encode_cancel_read(id));
+        if (!was_dead) {  // the pipe is gone: nothing to cancel, and the pipe object may be shutting down
+          send_(agent::encode_cancel_read(id));
+        }
         return finish({false, timed_out && !cancelled ? read_error::timeout : read_error::io});
       }
       cv_.wait_until(lock, deadline);

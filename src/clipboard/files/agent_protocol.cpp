@@ -173,6 +173,7 @@ namespace clipboard::files::agent {
   std::string encode_read_range(const read_range_t &v) {
     std::string p;
     put_u32(p, v.read_id);
+    put_id(p, v.offer);
     put_u32(p, v.file_index);
     put_u64(p, v.offset);
     put_u64(p, v.length);
@@ -183,6 +184,7 @@ namespace clipboard::files::agent {
     reader r {payload};
     read_range_t v {};
     v.read_id = static_cast<std::uint32_t>(r.num(4));
+    v.offer = r.id();
     v.file_index = static_cast<std::uint32_t>(r.num(4));
     v.offset = r.num(8);
     v.length = r.num(8);
@@ -288,6 +290,12 @@ namespace clipboard::files::agent {
   std::optional<std::tuple<offer_id_t, bool, std::string>> offer_assembler::add(std::string_view set_offer_part_payload) {
     auto part = decode_set_offer_part(set_offer_part_payload);
     if (!part) {
+      if (active_) {
+        failure_ = id_;
+        active_ = false;
+        overflow_ = false;
+        buf_.clear();
+      }
       return std::nullopt;
     }
     if (!active_ || part->id != id_) {
@@ -299,6 +307,7 @@ namespace clipboard::files::agent {
     prefetch_ = part->prefetch;
     constexpr std::size_t max_assembled = (32u << 20) + (64u << 10);
     if (!overflow_ && buf_.size() + part->data.size() > max_assembled) {
+      failure_ = id_;
       overflow_ = true;  // discard the rest of this oversized offer, never deliver a truncated one
       buf_.clear();
       buf_.shrink_to_fit();

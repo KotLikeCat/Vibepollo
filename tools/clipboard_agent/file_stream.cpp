@@ -8,6 +8,11 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <deque>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <vector>
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -31,44 +36,43 @@ namespace clipboard_agent {
   }
 
   namespace {
+    constexpr std::size_t k_max_pieces = k_readahead_bytes / k_piece_bytes;  ///< concurrent reads == window / piece
+
     class stream_impl final: public IStream {
     public:
       stream_impl(std::uint64_t size, std::wstring name, std::int64_t mtime_ms):
           size_(size),
           name_(std::move(name)),
-          mtime_(filetime_from_unix_ms(mtime_ms)) {
-        // Cross-process reads must not be funnelled through the (message-pumping) STA.
-        IUnknown *unk = nullptr;
-        if (SUCCEEDED(CoCreateFreeThreadedMarshaler(static_cast<IStream *>(this), &unk))) {
-          ftm_ = unk;
-        }
-      }
+          mtime_(filetime_from_unix_ms(mtime_ms)) {}
 
       void init_remote(std::shared_ptr<range_source> src, std::uint32_t index) {
         src_ = std::move(src);
         index_ = index;
         token_ = std::make_shared<cancel_token>();
-        worker_ = std::thread([this] {
-          worker_loop();
-        });
+        for (std::size_t i = 0; i < k_max_pieces; ++i) {
+          workers_.emplace_back([this] {
+            worker_loop();
+          });
+        }
       }
 
-      void init_disk(std::filesystem::path path) {
-        path_ = std::move(path);
+      void init_disk(const std::filesystem::path &path) {
+        file_.open(path, std::ios::binary);
       }
 
       ~stream_impl() {
-        if (worker_.joinable()) {
+        if (!workers_.empty()) {
+          std::shared_ptr<cancel_token> tok;
           {
             std::lock_guard lock(m_);
             stop_ = true;
+            tok = token_;
           }
-          token_->cancel();
+          tok->cancel();
           cv_.notify_all();
-          worker_.join();
-        }
-        if (ftm_ != nullptr) {
-          ftm_->Release();
+          for (auto &w : workers_) {
+            w.join();
+          }
         }
       }
 
@@ -82,9 +86,6 @@ namespace clipboard_agent {
           *ppv = static_cast<IStream *>(this);
           AddRef();
           return S_OK;
-        }
-        if (riid == IID_IMarshal && ftm_ != nullptr) {
-          return ftm_->QueryInterface(riid, ppv);
         }
         return E_NOINTERFACE;
       }
@@ -144,14 +145,13 @@ namespace clipboard_agent {
         }
         const auto np = static_cast<std::uint64_t>(target);
         if (src_ && np != pos_) {
-          if (np >= buf_start_ && np <= buf_start_ + buf_.size()) {
-            buf_off_ = static_cast<std::size_t>(np - buf_start_);
-          } else {
-            ++gen_;
-            buf_.clear();
-            buf_off_ = 0;
-            buf_start_ = np;
-            err_ = false;
+          const bool in_window = (!pieces_.empty() && np >= pieces_.begin()->first && np <= next_fetch_) || (pieces_.empty() && np == next_fetch_);
+          if (!in_window) {
+            ++gen_;  // outstanding pieces belong to the old position: cancel and forget them
+            token_->cancel();
+            token_ = std::make_shared<cancel_token>();
+            pieces_.clear();
+            next_fetch_ = np;
           }
           cv_.notify_all();
         }
@@ -252,14 +252,14 @@ namespace clipboard_agent {
         if (pos_ >= size_ || cb == 0) {
           return S_OK;
         }
-        std::ifstream in(path_, std::ios::binary);
-        if (!in) {
+        if (!file_) {
           return STG_E_READFAULT;
         }
-        in.seekg(static_cast<std::streamoff>(pos_));
+        file_.clear();
+        file_.seekg(static_cast<std::streamoff>(pos_));
         const auto want = static_cast<std::streamsize>(std::min<std::uint64_t>(cb, size_ - pos_));
-        in.read(dst, want);
-        const auto n = in.gcount();
+        file_.read(dst, want);
+        const auto n = file_.gcount();
         if (n <= 0) {
           return STG_E_READFAULT;
         }
@@ -268,72 +268,103 @@ namespace clipboard_agent {
         return S_OK;
       }
 
+      /// Drops fully consumed pieces from the front (caller holds m_).
+      void drop_consumed() {
+        while (!pieces_.empty()) {
+          const auto &[start, p] = *pieces_.begin();
+          if (start + p.len > pos_) {
+            break;
+          }
+          pieces_.erase(pieces_.begin());
+        }
+      }
+
       HRESULT read_remote(char *dst, ULONG cb, ULONG &got) {
         std::unique_lock lock(m_);
         while (got < cb && pos_ < size_) {
-          const bool in_window = pos_ >= buf_start_ + buf_off_ && pos_ < buf_start_ + buf_.size();
-          if (!in_window) {
-            if (err_) {
-              return STG_E_READFAULT;
+          drop_consumed();
+          auto it = pieces_.upper_bound(pos_);
+          piece *p = nullptr;
+          std::uint64_t start = 0;
+          if (it != pieces_.begin()) {
+            --it;
+            if (pos_ < it->first + it->second.len) {
+              p = &it->second;
+              start = it->first;
             }
+          }
+          if (p != nullptr && p->st == piece::failed) {
+            return STG_E_READFAULT;
+          }
+          if (p == nullptr || p->st == piece::pending) {
             if (stop_) {
               return STG_E_READFAULT;
             }
-            cv_.notify_all();  // worker may be idle waiting for a window slot
+            cv_.notify_all();  // workers may be idle waiting for a free slot
             cv_.wait(lock);
             continue;
           }
-          const std::size_t at = static_cast<std::size_t>(pos_ - buf_start_);
-          const std::size_t n = std::min<std::size_t>({static_cast<std::size_t>(cb - got), buf_.size() - at, static_cast<std::size_t>(size_ - pos_)});
-          std::memcpy(dst + got, buf_.data() + at, n);
+          const auto at = static_cast<std::size_t>(pos_ - start);
+          const std::size_t n = std::min<std::size_t>(cb - got, p->data.size() - at);
+          std::memcpy(dst + got, p->data.data() + at, n);
           got += static_cast<ULONG>(n);
           pos_ += n;
-          buf_off_ = static_cast<std::size_t>(pos_ - buf_start_);
-          if (buf_off_ >= k_piece_bytes) {  // compact consumed bytes
-            buf_.erase(0, buf_off_);
-            buf_start_ += buf_off_;
-            buf_off_ = 0;
+          if (pos_ >= start + p->len) {
+            drop_consumed();
+            cv_.notify_all();  // a slot is free
           }
-          cv_.notify_all();
         }
         return S_OK;
       }
 
+      /// Up to k_max_pieces of these run concurrently, each issuing one <= 4 MiB read at consecutive offsets.
       void worker_loop() {
         std::unique_lock lock(m_);
         while (!stop_) {
-          const std::uint64_t next = buf_start_ + buf_.size();
-          const std::size_t ahead = buf_.size() - std::min(buf_off_, buf_.size());
-          if (inflight_ || err_ || next >= size_ || ahead + k_piece_bytes > k_readahead_bytes) {
+          drop_consumed();
+          if (next_fetch_ >= size_ || pieces_.size() >= k_max_pieces) {
             cv_.wait(lock);
             continue;
           }
+          const std::uint64_t start = next_fetch_;
+          const auto len = static_cast<std::uint32_t>(std::min<std::uint64_t>(k_piece_bytes, size_ - start));
+          next_fetch_ += len;
+          pieces_[start] = piece {len, piece::pending, {}};
           const auto gen = gen_;
-          const auto len = static_cast<std::uint32_t>(std::min<std::uint64_t>(k_piece_bytes, size_ - next));
-          inflight_ = true;
+          const auto tok = token_;
           lock.unlock();
-          std::string piece;
+          std::string data;
           read_result rr {false, clipboard::files::read_error::io};
           try {
-            rr = src_->read_cancellable(index_, next, len, piece, token_);
+            rr = src_->read_cancellable(index_, start, len, data, tok);
           } catch (...) {
             rr = {false, clipboard::files::read_error::io};
           }
           lock.lock();
-          inflight_ = false;
-          if (gen == gen_) {
-            if (rr.ok && piece.size() == len) {
-              buf_ += piece;
+          auto it = pieces_.find(start);
+          if (gen == gen_ && it != pieces_.end()) {
+            if (rr.ok && data.size() == len) {
+              it->second.data = std::move(data);
+              it->second.st = piece::ready;
             } else {
-              err_ = true;
+              it->second.st = piece::failed;
             }
-          }
+          }  // else: seeked away / consumed while in flight; discard
           cv_.notify_all();
         }
       }
 
+      struct piece {
+        std::uint32_t len;
+        enum state_t {
+          pending,
+          ready,
+          failed
+        } st;
+        std::string data;
+      };
+
       std::atomic<long> refs_ {1};
-      IUnknown *ftm_ {nullptr};
       const std::uint64_t size_;
       const std::wstring name_;
       const FILETIME mtime_;
@@ -346,19 +377,154 @@ namespace clipboard_agent {
       std::shared_ptr<range_source> src_;
       std::uint32_t index_ {0};
       std::shared_ptr<cancel_token> token_;
-      std::thread worker_;
-      std::string buf_;
-      std::uint64_t buf_start_ {0};  ///< file offset of buf_[0]
-      std::size_t buf_off_ {0};  ///< consumed prefix of buf_
+      std::vector<std::thread> workers_;
+      std::map<std::uint64_t, piece> pieces_;  ///< claimed pieces, contiguous from the first key up to next_fetch_
+      std::uint64_t next_fetch_ {0};
       std::uint64_t gen_ {0};
-      bool inflight_ {false};
-      bool err_ {false};
       bool stop_ {false};
 
       // disk mode
-      std::filesystem::path path_;
+      std::ifstream file_;
     };
+
+    /// Process-lifetime MTA thread that hosts the streams, so IStream calls from other processes arrive on RPC
+    /// threads and never queue behind the (message-pumping) STA that owns the clipboard.
+    class mta_host {
+    public:
+      mta_host():
+          thread_([this] {
+            run();
+          }) {}
+
+      /// Runs `fn` on the MTA thread and waits for it (used for object creation only, never for I/O).
+      bool run_sync(std::function<void()> fn) {
+        auto t = std::make_shared<task>();
+        t->fn = std::move(fn);
+        {
+          std::lock_guard lock(m_);
+          if (stop_) {
+            return false;
+          }
+          q_.push_back(t);
+        }
+        cv_.notify_all();
+        std::unique_lock lock(t->m);
+        t->cv.wait(lock, [&] {
+          return t->done;
+        });
+        return true;
+      }
+
+      void stop() {
+        {
+          std::lock_guard lock(m_);
+          stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+          thread_.join();
+        }
+      }
+
+    private:
+      struct task {
+        std::function<void()> fn;
+        std::mutex m;
+        std::condition_variable cv;
+        bool done {false};
+      };
+
+      void run() {
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        for (;;) {
+          std::shared_ptr<task> t;
+          {
+            std::unique_lock lock(m_);
+            cv_.wait(lock, [&] {
+              return stop_ || !q_.empty();
+            });
+            if (q_.empty()) {
+              break;  // stop requested and drained
+            }
+            t = q_.front();
+            q_.pop_front();
+          }
+          t->fn();
+          {
+            std::lock_guard lock(t->m);
+            t->done = true;
+          }
+          t->cv.notify_all();
+        }
+        if (com) {
+          CoUninitialize();
+        }
+      }
+
+      std::mutex m_;
+      std::condition_variable cv_;
+      std::deque<std::shared_ptr<task>> q_;
+      bool stop_ {false};
+      std::thread thread_;
+    };
+
+    std::mutex g_host_mutex;
+    mta_host *g_host = nullptr;  // intentionally never deleted: a joinable thread must not be destroyed at exit
+    bool g_host_stopped = false;
+
+    mta_host *host() {
+      std::lock_guard lock(g_host_mutex);
+      if (g_host == nullptr && !g_host_stopped) {
+        g_host = new mta_host();
+      }
+      return g_host;
+    }
   }  // namespace
+
+  IStream *create_mta_hosted_stream(std::function<IStream *()> create) {
+    IStream *marshaled = nullptr;  // CoMarshalInterThreadInterfaceInStream result (an IStream holding the marshal data)
+    IStream *direct = nullptr;
+    mta_host *h = host();
+    const bool ran = h != nullptr && h->run_sync([&] {
+      IStream *raw = create();
+      if (raw == nullptr) {
+        return;
+      }
+      if (SUCCEEDED(CoMarshalInterThreadInterfaceInStream(IID_IStream, raw, &marshaled))) {
+        raw->Release();  // the marshal stub now owns the object
+      } else {
+        direct = raw;
+      }
+    });
+    if (!ran) {
+      return create();  // host already shut down: plain object on the caller's thread
+    }
+    if (direct != nullptr) {
+      return direct;
+    }
+    if (marshaled == nullptr) {
+      return nullptr;
+    }
+    IStream *proxy = nullptr;
+    if (FAILED(CoGetInterfaceAndReleaseStream(marshaled, IID_IStream, reinterpret_cast<void **>(&proxy)))) {
+      return nullptr;
+    }
+    return proxy;
+  }
+
+  void shutdown_mta_host() {
+    mta_host *h = nullptr;
+    {
+      std::lock_guard lock(g_host_mutex);
+      h = g_host;
+      g_host = nullptr;
+      g_host_stopped = true;
+    }
+    if (h != nullptr) {
+      h->stop();
+      delete h;
+    }
+  }
 
   IStream *create_remote_stream(std::shared_ptr<range_source> src, std::uint32_t index, std::uint64_t size, std::wstring name, std::int64_t mtime_ms) {
     auto *s = new stream_impl(size, std::move(name), mtime_ms);
@@ -368,7 +534,7 @@ namespace clipboard_agent {
 
   IStream *create_disk_stream(std::filesystem::path path, std::uint64_t size, std::wstring name, std::int64_t mtime_ms) {
     auto *s = new stream_impl(size, std::move(name), mtime_ms);
-    s->init_disk(std::move(path));
+    s->init_disk(path);
     return s;
   }
 }  // namespace clipboard_agent

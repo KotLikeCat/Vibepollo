@@ -48,6 +48,7 @@ namespace clipboard::files::agent {
   };
   struct read_range_t {
     std::uint32_t read_id;
+    offer_id_t offer;  ///< offer the file_index refers to; the core rejects reads for a non-current offer
     std::uint32_t file_index;
     std::uint64_t offset;
     std::uint64_t length;
@@ -101,7 +102,15 @@ namespace clipboard::files::agent {
     /// Returns (offer id, prefetch, mlcf) once the `last` part arrives; nullopt otherwise or on malformed input.
     std::optional<std::tuple<offer_id_t, bool, std::string>> add(std::string_view set_offer_part_payload);
 
+    /// Offer id whose assembly was abandoned (oversized, or an undecodable part during assembly); cleared on read.
+    std::optional<offer_id_t> take_failure() {
+      auto f = failure_;
+      failure_.reset();
+      return f;
+    }
+
   private:
+    std::optional<offer_id_t> failure_;
     bool active_ {false};
     bool overflow_ {false};
     offer_id_t id_ {};

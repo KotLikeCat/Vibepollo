@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,26 +38,36 @@ namespace clipboard_agent {
 
     void cancel() {
       flag_.store(true);
-      std::function<void()> hook;
+      std::vector<std::function<void()>> hooks;
       {
         std::lock_guard lock(m_);
-        hook = hook_;
+        for (auto &[id, fn] : hooks_) {
+          hooks.push_back(fn);
+        }
       }
-      if (hook) {
-        hook();
+      for (auto &fn : hooks) {
+        fn();
       }
     }
 
-    /// Source-side: called by cancel() to wake a waiting read. Cleared with an empty function.
-    void set_hook(std::function<void()> hook) {
+    /// Source-side: registers a wake-up called by cancel(); several reads may share one token.
+    std::uint64_t add_hook(std::function<void()> hook) {
       std::lock_guard lock(m_);
-      hook_ = std::move(hook);
+      const auto id = ++next_hook_;
+      hooks_[id] = std::move(hook);
+      return id;
+    }
+
+    void remove_hook(std::uint64_t id) {
+      std::lock_guard lock(m_);
+      hooks_.erase(id);
     }
 
   private:
     std::atomic<bool> flag_ {false};
     std::mutex m_;
-    std::function<void()> hook_;
+    std::map<std::uint64_t, std::function<void()>> hooks_;
+    std::uint64_t next_hook_ {0};
   };
 
   class range_source {  ///< blocking; called from worker / RPC threads
